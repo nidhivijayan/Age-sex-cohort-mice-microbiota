@@ -1,3 +1,11 @@
+#Add libraries
+library(qiime2R)
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(tidyverse)
+
 #creating qiime object =====
 qiime<-qza_to_phyloseq(features="Aging-table-dada2.qza",
                        tree="rooted-tree-merged.qza",
