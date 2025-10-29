@@ -1,0 +1,453 @@
+---
+---
+title: "Alpha Diversity Analysis"
+author: "Nidhi Vijayan"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true          # adds a floating table of contents
+    toc_depth: 3       # number of heading levels to include
+    theme: united      # optional theme (e.g., united, cerulean, cosmo)
+    highlight: tango   # syntax highlighting style
+---
+
+------------------------------------------------------------------------
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Alpha Diversity of mice based on age, sex, and cohort
+
+```{r}
+## alpha diversity ====
+library(lme4)
+library(lmerTest)
+library(knitr)
+library(dplyr)
+library(phyloseq)
+library(vegan)
+library(emmeans)
+library(tibble)
+library(reshape2)
+library(tidyverse)
+
+load("qiime_f.RData")  
+metadata_df<-as.data.frame(sample_data(qiime_f))
+metadata_df$SampleID<-rownames(metadata_df)
+metadata_df<-as.matrix(metadata_df)
+
+qiime_f_rare<-rarefy_even_depth(qiime_f,sample.size = min(sample_sums(qiime_f)))
+
+alpha.div.df <- estimate_richness(
+  qiime_f_rare, 
+  measures=c("Shannon", "Observed")) %>% 
+  rownames_to_column("SampleID") %>% 
+  merge(metadata_df, by="SampleID")
+View(alpha.div.df)
+alpha.div.long.df <- alpha.div.df %>% 
+  pivot_longer(c(Shannon, Observed), names_to="metric")
+
+alpha.div.long.df$month_n<-as.numeric(alpha.div.long.df$month_n)
+
+# summarize across sexes
+alpha.div.plot.df <- alpha.div.long.df %>% 
+  dplyr::filter(metric %in% c("Shannon", "Observed")) %>% 
+  dplyr::filter(month_n <= 40) %>% # omit the few 46 month samples
+  
+  # compute mean and SD across diets (separately for each metric)
+  group_by(metric, sex, month_n, mousegroup.x) %>% 
+  summarise(n=n(),
+            mean = mean(value),
+            sd = sd(value),
+            sem = sd(value)/sqrt(n()), .groups="drop") %>% 
+  
+  # make sure we have at least 3 observations at this age combination
+  dplyr::filter(n >= 2) #%>% 
+
+#plot Fig 2 alpha ====
+alpha.div.plot.df$month_n <- as.numeric(alpha.div.plot.df$month_n)
+alpha.div.plot.df <- alpha.div.plot.df %>%
+  arrange(metric, sex, month_n)
+```
+
+## Alpha diversity plot
+
+```{r alpha-plot, fig.width=8, fig.height=5, echo=TRUE}
+alpha.div.plot.df %>%
+  ggplot(aes(
+    x = month_n, y = mean,
+    ymin = mean - sem, ymax = mean + sem,
+    color = sex, group = interaction(sex, metric)
+  )) +
+  geom_path(alpha = 0.7) +
+  geom_pointrange(alpha = 0.7) +
+  facet_wrap(~ metric + mousegroup.x, scales = "free", nrow = 2) +
+  scale_color_manual(values = c("deeppink", "blue")) +
+  labs(
+    x = "Age (months)",
+    y = "",
+    title = "Alpha diversity ASV method"
+  ) +
+  theme_bw()
+
+```
+
+## LMER for alpha
+
+```{r}
+df_wide <- alpha.div.long.df %>%
+  pivot_wider(names_from = metric, values_from = value)
+
+```
+## Q1: Are there differences between sex and month, and if so, when?
+## Q2: Which months differ from baseline in males and females separately?
+```{r}
+
+model1 <- lmer(Shannon ~ sex * month + (1 | mousegroup.x) + (1 | mouse), data = df_wide)
+kable(anova(model1, type = 3), caption = "ANOVA for model1 with all cohort")
+```
+
+```{r}
+kable(summary(model1)$coefficients, digits = 4)
+
+```
+
+### Interpretation of the above table
+
+In the above, F M03 is reference. sexM result suggests at M03, Male sig. higher than female at M03 (by 0.1515). Females at M23 not significantly different between females at M03 (p=0.43). The sex difference in month 23 is significantly different from the sex difference in M03 (p=0.0122),
+
+### ANOVA for model1 (Shannon with all cohorts)
+
+|           |    Sum Sq |   Mean Sq | NumDF |    DenDF |   F value |   Pr(\>F) |
+|:----------|----------:|----------:|------:|---------:|----------:|----------:|
+| sex       | 0.5794963 | 0.5794963 |     1 | 102.2983 | 10.870027 | 0.0013445 |
+| month     | 1.8934174 | 0.1352441 |    14 | 474.3694 |  2.536870 | 0.0016396 |
+| sex:month | 1.2073909 | 0.0862422 |    14 | 559.5593 |  1.617707 | 0.0700462 |
+
+```{r}
+# Estimated marginal means by Sex within Month for Shannon
+emm_sex_within_month <- emmeans(model1, ~ sex | month)
+pairs_sex_within_month <- contrast(emm_sex_within_month, method = "pairwise", adjust = "holm")
+pairs_sex_within_month
+
+emm_month_within_sex <- emmeans(model1, ~ month | sex)
+baseline_contrasts <- contrast(emm_month_within_sex, method = "trt.vs.ctrl", ref = 1, by = "sex")
+
+plot(baseline_contrasts)
+
+```
+
+```{r emmeans_sex_within_month, fig.width=5, fig.height=8, echo=TRUE}
+plot(emm_sex_within_month, comparisons = TRUE)
+```
+
+### Interpretation of fig
+
+Within each month, we are looking at sex differences. Overall, the females have a higher alpha diversity than males.
+
+## Subsetting per cohort
+
+### Cohort G1
+
+```{r}
+df_wide_G1<- df_wide %>%
+  filter(mousegroup.x== "G1")
+View(df_wide_G1)
+
+model1_G1 <- lmer(Shannon ~ sex * month + (1 | mouse), data = df_wide_G1)
+summary(model1_G1)
+
+# From the summary result: There was no difference between sexes at M03, or difference with females, or relationship to M-F relative to baseline
+```
+
+```{r}
+kable(anova(model1_G1, type = 3), caption ="ANOVA for Cohort G1: Shannon")
+```
+
+```{r}
+
+model2_G1 <- lmer(Observed ~ sex * month + (1 | mouse), data = df_wide_G1)
+```
+
+### cohort G1: Observed
+
+From the below table:
+
+1.  There is no difference between male and females at M03
+2.  Females at month M07, M09, M13, M16, and M17 are significantly different from females at M03
+3.  Compared to the difference between males and females in M03, there was no sig difference between Males and Females in other months
+
+|               | Estimate | Std. Error |  df | t value | Pr(\>\|t\|) |
+|:--------------|---------:|-----------:|----:|--------:|------------:|
+| (Intercept)   | 123.1429 |     8.4062 | 122 | 14.6491 |      0.0000 |
+| sexM          |   2.3016 |    11.2082 | 122 |  0.2053 |      0.8376 |
+| monthM05      |   5.5238 |    12.3736 | 122 |  0.4464 |      0.6561 |
+| monthM07      |  45.4286 |    11.8881 | 122 |  3.8213 |      0.0002 |
+| monthM09      |  45.8571 |    11.5106 | 122 |  3.9839 |      0.0001 |
+| monthM11      |  16.9683 |    11.2082 | 122 |  1.5139 |      0.1326 |
+| monthM13      |  46.1905 |    12.3736 | 122 |  3.7330 |      0.0003 |
+| monthM15      |  32.1071 |    11.5106 | 122 |  2.7893 |      0.0061 |
+| monthM17      |  28.6349 |    11.2082 | 122 |  2.5548 |      0.0119 |
+| monthM19      |   7.0238 |    12.3736 | 122 |  0.5676 |      0.5713 |
+| monthM22      | -14.4762 |    15.3475 | 122 | -0.9432 |      0.3474 |
+| sexM:monthM05 |  -8.7683 |    17.5213 | 122 | -0.5004 |      0.6177 |
+| sexM:monthM07 |  -6.4286 |    15.8509 | 122 | -0.4056 |      0.6858 |
+| sexM:monthM09 | -15.0516 |    15.7888 | 122 | -0.9533 |      0.3423 |
+| sexM:monthM11 |   8.2123 |    15.5697 | 122 |  0.5275 |      0.5988 |
+| sexM:monthM13 |  -2.4921 |    16.6952 | 122 | -0.1493 |      0.8816 |
+| sexM:monthM15 | -12.5516 |    16.0661 | 122 | -0.7812 |      0.4362 |
+| sexM:monthM17 | -15.0794 |    16.2181 | 122 | -0.9298 |      0.3543 |
+| sexM:monthM19 |  28.5317 |    16.4285 | 122 |  1.7367 |      0.0850 |
+| sexM:monthM22 |  17.1984 |    19.3119 | 122 |  0.8906 |      0.3749 |
+
+### ANOVA of ModelG1: Observed
+
+|           |      Sum Sq |    Mean Sq | NumDF | DenDF |   F value |         Pr(\>F) |
+|:----------|------------:|-----------:|------:|------:|----------:|----------------:|
+| sex       |    91.47856 |   91.47856 |     1 |   122 | 0.1849369 |       0.6679231 |
+| month     | 36277.26342 | 4030.80705 |     9 |   122 | 8.1488478 | 2.09e-09 \*\*\* |
+| sex:month |  6297.16741 |  699.68527 |     9 |   122 | 1.4145130 |       0.1890481 |
+
+```{r}
+# Estimated marginal means by Sex within Month for Shannon
+emm_sex_within_month_G1 <- emmeans(model1_G1, ~ sex | month)
+pairs_sex_within_month_G1 <- contrast(emm_sex_within_month, method = "pairwise", adjust = "holm")
+
+emm_month_within_sex_G1 <- emmeans(model1_G1, ~ month | sex)
+baseline_contrasts_G1 <- contrast(emm_month_within_sex_G1, method = "trt.vs.ctrl", ref = 1, by = "sex")
+
+plot(baseline_contrasts_G1)
+```
+
+```{r emmeans_sex_within_month_G1, fig.width=5, fig.height=8, echo=TRUE}
+plot(emm_sex_within_month_G1, comparisons = TRUE)
+```
+
+
+### Cohort C
+
+```{r}
+df_wide_C<- df_wide %>%
+  filter(mousegroup.x== "C")
+model1_C <- lmer(Shannon ~ sex * month + (1 | mouse), data = df_wide_C)
+
+```
+
+### Summary Cohort C: Shannon
+
+From the below table:
+
+1.  There is sig. difference between male and females at M03 (p=0.0005)
+2.  Females shannon diversity relatively stable with age
+3.  Compared to the difference between males and females in M03, there was sig difference (decreasing) between Males and Females in months M12 (p= 0.0347), M15 (p=0.0320), and M23 (p=0.0006)
+
+|               | Estimate | Std. Error |       df | t value | Pr(\>\|t\|) |
+|:--------------|---------:|-----------:|---------:|--------:|------------:|
+| (Intercept)   |   3.8023 |     0.0608 | 219.0609 | 62.5293 |      0.0000 |
+| sexM          |   0.2902 |     0.0821 | 218.7018 |  3.5329 |      0.0005 |
+| monthM06      |   0.0473 |     0.0810 | 193.8009 |  0.5838 |      0.5600 |
+| monthM09      |   0.0858 |     0.0792 | 201.6122 |  1.0829 |      0.2802 |
+| monthM12      |   0.1241 |     0.0838 | 196.9755 |  1.4807 |      0.1403 |
+| monthM15      |   0.0797 |     0.0810 | 193.8009 |  0.9837 |      0.3265 |
+| monthM18      |   0.0662 |     0.0891 | 193.1763 |  0.7423 |      0.4588 |
+| monthM21      |   0.0266 |     0.0822 | 192.6006 |  0.3238 |      0.7464 |
+| monthM23      |   0.1353 |     0.0798 | 192.4630 |  1.6951 |      0.0917 |
+| sexM:monthM06 |  -0.1082 |     0.1128 | 195.5182 | -0.9591 |      0.3387 |
+| sexM:monthM09 |  -0.1615 |     0.1170 | 202.4634 | -1.3803 |      0.1690 |
+| sexM:monthM12 |  -0.2441 |     0.1148 | 196.0534 | -2.1268 |      0.0347 |
+| sexM:monthM15 |  -0.2437 |     0.1128 | 195.9673 | -2.1600 |      0.0320 |
+| sexM:monthM18 |  -0.2234 |     0.1210 | 196.4263 | -1.8459 |      0.0664 |
+| sexM:monthM21 |  -0.2252 |     0.1161 | 198.1406 | -1.9398 |      0.0538 |
+| sexM:monthM23 |  -0.3868 |     0.1101 | 193.5140 | -3.5121 |      0.0006 |
+
+```{r}
+
+kable(anova(model1_C, type = 3), caption = "ANOVA for model1 (Shannon)_C")
+```
+
+```{r}
+model2_C <- lmer(Observed ~ sex * month + (1 | mouse), data = df_wide_C)
+kable(summary(model2_C)$coefficients, digits = 4, caption = "Fixed effects for Observed model (Cohort C)")
+
+```
+
+#### In cohort C, no differences in Observed diversity metric.
+
+```{r}
+# Estimated marginal means by Sex within Month for Shannon
+emm_sex_within_month_C <- emmeans(model1_C, ~ sex | month)
+pairs_sex_within_month_C <- contrast(emm_sex_within_month_C, method = "pairwise", adjust = "holm")
+
+emm_month_within_sex_C <- emmeans(model1_C, ~ month | sex)
+baseline_contrasts_C <- contrast(emm_month_within_sex_C, method = "trt.vs.ctrl", ref = 1, by = "sex")
+
+plot(baseline_contrasts_C)
+```
+
+```{r emmeans_sex_within_month_C, fig.width=5, fig.height=8, echo=TRUE}
+plot(emm_sex_within_month_C, comparisons = TRUE)
+```
+
+
+### For Cohort G2
+
+SHANNON
+
+1.  Sig. diff between M and F in M03
+2.  Females are stable
+3.  No differences in M and F
+
+|               | Estimate | Std. Error |       df | t value | Pr(\>\|t\|) |
+|:--------------|---------:|-----------:|---------:|--------:|------------:|
+| (Intercept)   |   3.7939 |     0.1246 | 101.2543 | 30.4592 |      0.0000 |
+| sexM          |   0.1223 |     0.1505 |  99.3598 |  0.8126 |      0.4184 |
+| monthM05      |  -0.2431 |     0.1490 |  92.9471 | -1.6313 |      0.1062 |
+| monthM07      |   0.3279 |     0.1489 |  92.7019 |  2.2017 |      0.0302 |
+| monthM09      |   0.0667 |     0.1499 |  94.2028 |  0.4450 |      0.6574 |
+| monthM11      |   0.1733 |     0.1713 |  97.3980 |  1.0116 |      0.3142 |
+| monthM13      |   0.0261 |     0.1600 |  94.1260 |  0.1631 |      0.8708 |
+| monthM15      |   0.1091 |     0.1847 |  96.9481 |  0.5908 |      0.5560 |
+| monthM17      |  -0.0433 |     0.1544 |  94.8884 | -0.2803 |      0.7799 |
+| monthM19      |   0.3025 |     0.1544 |  94.8884 |  1.9587 |      0.0531 |
+| monthM21      |  -0.0113 |     0.1825 |  94.0437 | -0.0618 |      0.9509 |
+| monthM23      |  -0.0786 |     0.1600 |  94.2136 | -0.4913 |      0.6244 |
+| sexM:monthM05 |   0.2209 |     0.1907 |  92.3040 |  1.1579 |      0.2499 |
+| sexM:monthM07 |  -0.2129 |     0.1995 |  92.9569 | -1.0674 |      0.2886 |
+| sexM:monthM09 |  -0.1397 |     0.1915 |  93.3516 | -0.7293 |      0.4677 |
+| sexM:monthM11 |  -0.1075 |     0.2087 |  95.8024 | -0.5149 |      0.6078 |
+| sexM:monthM13 |   0.0446 |     0.1995 |  93.2802 |  0.2236 |      0.8236 |
+| sexM:monthM15 |  -0.1136 |     0.2231 |  95.7534 | -0.5091 |      0.6119 |
+| sexM:monthM17 |   0.0029 |     0.2036 |  94.1650 |  0.0142 |      0.9887 |
+| sexM:monthM19 |  -0.2752 |     0.2108 |  94.4461 | -1.3056 |      0.1949 |
+| sexM:monthM21 |  -0.0380 |     0.2256 |  93.7753 | -0.1683 |      0.8667 |
+| sexM:monthM23 |  -0.0581 |     0.2079 |  93.9131 | -0.2794 |      0.7805 |
+
+: Fixed effects for Observed model (Cohort G2)
+
+OBSERVED For G2
+
+1.  No diff at baseline
+2.  M07 and M19 females are diff from M03
+3.  Marginal diff between M and F in M19
+
+|               | Estimate | Std. Error |       df | t value | Pr(\>\|t\|) |
+|:--------------|---------:|-----------:|---------:|--------:|------------:|
+| (Intercept)   | 116.9246 |    11.8680 | 100.9588 |  9.8521 |      0.0000 |
+| sexM          |  13.2977 |    14.3580 |  98.5733 |  0.9261 |      0.3566 |
+| monthM05      |  11.7280 |    14.1262 |  92.5827 |  0.8302 |      0.4085 |
+| monthM07      |  45.4176 |    14.1182 |  92.3351 |  3.2170 |      0.0018 |
+| monthM09      |  24.7788 |    14.2162 |  93.7734 |  1.7430 |      0.0846 |
+| monthM11      |  13.0188 |    16.2621 |  96.9500 |  0.8006 |      0.4253 |
+| monthM13      |   3.5086 |    15.1743 |  93.7729 |  0.2312 |      0.8176 |
+| monthM15      |  16.5746 |    17.5303 |  96.4958 |  0.9455 |      0.3468 |
+| monthM17      |  17.7518 |    14.6462 |  94.5244 |  1.2120 |      0.2285 |
+| monthM19      |  56.7518 |    14.6462 |  94.5244 |  3.8748 |      0.0002 |
+| monthM21      | -10.5578 |    17.3059 |  93.6354 | -0.6101 |      0.5433 |
+| monthM23      |  17.0319 |    15.1767 |  93.8676 |  1.1222 |      0.2646 |
+| sexM:monthM05 |  15.8732 |    18.0796 |  91.9626 |  0.8780 |      0.3823 |
+| sexM:monthM07 | -24.2694 |    18.9094 |  92.6070 | -1.2835 |      0.2025 |
+| sexM:monthM09 | -13.9993 |    18.1584 |  92.9841 | -0.7710 |      0.4427 |
+| sexM:monthM11 |   2.7607 |    19.8010 |  95.3951 |  0.1394 |      0.8894 |
+| sexM:monthM13 |  15.7810 |    18.9142 |  92.9558 |  0.8343 |      0.4062 |
+| sexM:monthM15 |  -9.2275 |    21.1623 |  95.3389 | -0.4360 |      0.6638 |
+| sexM:monthM17 |  -8.5881 |    19.3048 |  93.8117 | -0.4449 |      0.6574 |
+| sexM:monthM19 | -37.3228 |    19.9866 |  94.0765 | -1.8674 |      0.0650 |
+| sexM:monthM21 |   5.2741 |    21.3946 |  93.3928 |  0.2465 |      0.8058 |
+| sexM:monthM23 |  -8.5674 |    19.7165 |  93.5724 | -0.4345 |      0.6649 |
+
+: Fixed effects for Observed model (Cohort G2)
+
+```{r}
+# Estimated marginal means by Sex within Month for Shannon
+df_wide_G2<- df_wide %>%
+  filter(mousegroup.x== "G2")
+  
+model1_G2 <- lmer(Shannon ~ sex * month + (1 | mouse), data = df_wide_G2)
+emm_sex_within_month_G2 <- emmeans(model1_G2, ~ sex | month)
+pairs_sex_within_month_G2 <- contrast(emm_sex_within_month_G2, method = "pairwise", adjust = "holm")
+
+emm_month_within_sex_G2 <- emmeans(model1_G2, ~ month | sex)
+baseline_contrasts_G2 <- contrast(emm_month_within_sex_G2, method = "trt.vs.ctrl", ref = 1, by = "sex")
+
+plot(baseline_contrasts_G2)
+```
+
+```{r emmeans_sex_within_month_G2, fig.width=5, fig.height=8, echo=TRUE}
+plot(emm_sex_within_month_G2, comparisons = TRUE)
+```
+
+
+### Cohort G3
+
+OBSERVED
+
+M11 females diff from M03 females
+
+|               | Estimate | Std. Error |  df | t value | Pr(\>\|t\|) |
+|:--------------|---------:|-----------:|----:|--------:|------------:|
+| (Intercept)   | 151.6000 |     9.3928 | 100 | 16.1401 |      0.0000 |
+| sexM          |   4.4000 |    11.5037 | 100 |  0.3825 |      0.7029 |
+| monthM05      |   4.6000 |    13.2834 | 100 |  0.3463 |      0.7298 |
+| monthM07      |  -2.2667 |    12.7179 | 100 | -0.1782 |      0.8589 |
+| monthM09      |   8.4000 |    15.3383 | 100 |  0.5476 |      0.5852 |
+| monthM11      |  33.9000 |    14.0892 | 100 |  2.4061 |      0.0180 |
+| monthM13      |  11.1500 |    14.0892 | 100 |  0.7914 |      0.4306 |
+| monthM15      |   8.0667 |    15.3383 | 100 |  0.5259 |      0.6001 |
+| monthM17      | -29.6000 |    23.0075 | 100 | -1.2865 |      0.2012 |
+| monthM19      |  -5.8000 |    13.2834 | 100 | -0.4366 |      0.6633 |
+| monthM22      | -20.7667 |    12.7179 | 100 | -1.6329 |      0.1056 |
+| monthM23      | -14.0000 |    22.0280 | 100 | -0.6356 |      0.5265 |
+| sexM:monthM05 |  12.5111 |    16.4187 | 100 |  0.7620 |      0.4479 |
+| sexM:monthM07 |   2.9667 |    15.8104 | 100 |  0.1876 |      0.8515 |
+| sexM:monthM09 | -44.2571 |    18.5039 | 100 | -2.3918 |      0.0186 |
+| sexM:monthM11 | -25.0000 |    16.9331 | 100 | -1.4764 |      0.1430 |
+| sexM:monthM13 |  13.3500 |    17.7802 | 100 |  0.7508 |      0.4545 |
+| sexM:monthM15 |   5.3778 |    18.1215 | 100 |  0.2968 |      0.7673 |
+| sexM:monthM17 |  24.1000 |    25.4357 | 100 |  0.9475 |      0.3457 |
+| sexM:monthM19 | -13.6000 |    17.5723 | 100 | -0.7739 |      0.4408 |
+| sexM:monthM22 |  13.2667 |    16.7146 | 100 |  0.7937 |      0.4292 |
+
+SHANNON
+
+|               | Estimate | Std. Error |  df | t value |     Pr() |
+|:--------------|---------:|-----------:|----:|--------:|---------:|
+| (Intercept)   |   3.9141 |     0.1000 | 100 | 39.1539 |   0.0000 |
+| sexM          |   0.0736 |     0.1224 | 100 |  0.6010 |   0.5492 |
+| monthM05      |   0.0475 |     0.1414 | 100 |  0.3358 |   0.7377 |
+| monthM07      |   0.0356 |     0.1354 | 100 |  0.2631 |   0.7930 |
+| monthM09      |   0.1372 |     0.1632 | 100 |  0.8405 |   0.4026 |
+| monthM11      |   0.1876 |     0.1499 | 100 |  1.2514 |   0.2137 |
+| monthM13      |   0.1749 |     0.1499 | 100 |  1.1666 |   0.2462 |
+| monthM15      |   0.3460 |     0.1632 | 100 |  2.1197 | 0.0365\* |
+| monthM17      |   0.2787 |     0.2449 | 100 |  1.1383 |   0.2577 |
+| monthM19      |  -0.0303 |     0.1414 | 100 | -0.2143 |   0.8307 |
+| monthM22      |  -0.3130 |     0.1354 | 100 | -2.3122 | 0.0228\* |
+| sexM:monthM05 |  -0.0310 |     0.1747 | 100 | -0.1777 |   0.8594 |
+| sexM:monthM07 |  -0.0396 |     0.1683 | 100 | -0.2354 |   0.8144 |
+| sexM:monthM09 |  -0.2277 |     0.1969 | 100 | -1.1564 |   0.2503 |
+| sexM:monthM11 |  -0.0360 |     0.1802 | 100 | -0.2000 |   0.8419 |
+| sexM:monthM13 |   0.0120 |     0.1892 | 100 |  0.0635 |   0.9495 |
+| sexM:monthM15 |  -0.1370 |     0.1929 | 100 | -0.7106 |   0.4790 |
+| sexM:monthM17 |  -0.3000 |     0.2707 | 100 | -1.1080 |   0.2705 |
+| sexM:monthM19 |  -0.0251 |     0.1870 | 100 | -0.1342 |   0.8935 |
+| sexM:monthM22 |   0.1546 |     0.1779 | 100 |  0.8691 |   0.3869 |
+
+```{r}
+# Estimated marginal means by Sex within Month for Shannon
+df_wide_G3<- df_wide %>%
+  filter(mousegroup.x== "G3")
+  
+model1_G3 <- lmer(Shannon ~ sex * month + (1 | mouse), data = df_wide_G3)
+emm_sex_within_month_G3 <- emmeans(model1_G3, ~ sex | month)
+pairs_sex_within_month_G3 <- contrast(emm_sex_within_month_G3, method = "pairwise", adjust = "holm")
+
+emm_month_within_sex_G3 <- emmeans(model1_G3, ~ month | sex)
+baseline_contrasts_G3 <- contrast(emm_month_within_sex_G3, method = "trt.vs.ctrl", ref = 1, by = "sex")
+
+plot(baseline_contrasts_G3)
+```
+
+```{r emmeans_sex_within_month_G3, fig.width=5, fig.height=8, echo=TRUE}
+plot(emm_sex_within_month_G3, comparisons = TRUE)
+```
