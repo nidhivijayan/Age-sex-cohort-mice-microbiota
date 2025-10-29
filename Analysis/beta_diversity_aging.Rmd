@@ -1,0 +1,251 @@
+---
+title: "Beta Diversity Analysis"
+author: "Nidhi Vijayan"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false   # keep TOC expanded
+      smooth_scroll: true
+    number_sections: true
+    theme: flatly        # other themes: cosmo, readable, united, etc.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Beta diversity differences by age, sex, and cohort
+
+```{r, echo=TRUE}
+
+library(lme4)
+library(lmerTest)
+library(knitr)
+library(dplyr)
+library(phyloseq)
+library(vegan)
+library(emmeans)
+library(tibble)
+library(reshape2)
+library(tidyverse)
+library(qiime2R)
+library(ggpubr)
+library(ggplot2)
+library(pairwiseAdonis)
+
+theme_set(theme_bw())
+load("qiime_f.RData") 
+qiime_norm<-  qiime_f %>%
+  transform_sample_counts(function(x) x/sum(x))
+```
+
+### Bray-Curtis distance PCoA
+
+```{r pressure, echo=FALSE}
+bdist.ord <- ordinate(qiime_norm, "PCoA", "bray")
+
+plot_ordination(qiime_norm, bdist.ord, color="sex", title="Bray Curtis")+geom_point(aes(fill=sex))+
+  scale_fill_manual(values=c("deeppink","blue"))+theme(legend.text = element_text(size=12))+
+ scale_color_manual(values=c("deeppink","blue"))+
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21)),
+    shape = guide_legend())+
+  #scale_alpha_continuous(range = c(0.05, 1))+
+  #scale_size_continuous(range = c(0.5, 4)) +
+  stat_ellipse(aes(group=sex), linetype="dashed")
+
+
+```
+
+```{r}
+ordination_wu <- ordinate(qiime_norm, method = "PCoA", distance = "unifrac", weighted=TRUE)
+```
+
+### Weighted UniFrac PCoA
+
+```{r, echo=FALSE}
+# Plot: pass the phyloseq object, not the distance
+plot_ordination(qiime_norm, ordination_wu, color = "sex",
+                        title = "Weighted UniFrac (PCoA)") +
+  geom_point(aes(fill = sex), shape = 21, colour = "black", size = 3) +
+  scale_fill_manual(values = c("deeppink", "blue")) +
+  theme(legend.text = element_text(size = 12)) +
+  guides(fill = guide_legend(override.aes = list(shape = 21)))+stat_ellipse(aes(group=sex), linetype="dashed")+
+  scale_color_manual(values=c("deeppink","blue"))
+```
+
+```{r, echo=FALSE}
+plot_ordination(qiime_norm, ordination_wu,, color="mousegroup.x", title="Weighted Unifrac by Cohort")+geom_point(aes(fill=mousegroup.x))+
+  scale_fill_manual(values=c("#E69F00", "#56B4E9", "#009E73", "#CC79A7"))+theme(legend.text = element_text(size=12))+
+  scale_color_manual(values=c("#E69F00", "#56B4E9", "#009E73", "#CC79A7"))+
+  guides(fill = guide_legend(override.aes = list(shape = 21)))+
+  stat_ellipse(aes(group=mousegroup.x), linetype="dashed")
+```
+
+### Jacard Distance
+
+```{r}
+ordination_jac <- ordinate(qiime_norm, method = "PCoA", distance = "jaccard")
+```
+
+```{r}
+plot_ordination(qiime_norm, ordination_jac, color="sex", title="Jaccard distance by sex")+geom_point(aes(fill=sex))+
+  scale_fill_manual(values=c("deeppink","blue"))+theme(legend.text = element_text(size=12))+
+ scale_color_manual(values=c("deeppink","blue"))+
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21)),
+    shape = guide_legend())+
+  stat_ellipse(aes(group=sex), linetype="dashed")
+```
+
+```{r, echo-FALSE}
+plot_ordination(qiime_norm, ordination_jac, color="mousegroup.x", title="Jaccard distance by cohort")+geom_point(aes(fill=mousegroup.x,shape="x"), colour="black", size=3)+
+  scale_fill_manual(values=c("#E69F00", "#56B4E9", "#009E73", "#CC79A7"))+theme(legend.text = element_text(size=12))+
+  scale_shape_manual(values = c(21, 22, 23, 24, 25))+scale_color_manual(values=c("#E69F00", "#56B4E9", "#009E73", "#CC79A7"))+
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21)),
+    shape = guide_legend()
+  )+stat_ellipse(aes(group=mousegroup.x), linetype="dashed")
+```
+
+### How does the beta diversity distance change with time in males and females
+
+```{r}
+ord_df <- as.data.frame(bdist.ord$vectors)
+
+samples_df<-as.data.frame(sample_data(qiime_f))
+
+ord_df$month <- samples_df$month
+ord_df$sex<-samples_df$sex
+
+#Calculating the average distance of centroid for each month and sex
+centroids <- ord_df %>%
+  group_by(month, sex) %>%
+  summarise(
+    PC1 = mean(Axis.1),
+    PC2 = mean(Axis.2),
+    .groups = "drop"
+  ) %>%
+  arrange(sex, as.numeric(gsub("M", "", month))) %>%
+  mutate(month = factor(month, levels = unique(month)))
+
+#How do the centroids change with time
+centroid_shift <- centroids %>%
+  group_by(sex) %>%
+  arrange(sex, as.numeric(gsub("M", "", month))) %>%
+  mutate(
+    next_month = lead(month),
+    next_PC1 = lead(PC1),
+    next_PC2 = lead(PC2),
+    shift_distance = sqrt((next_PC1 - PC1)^2 + (next_PC2 - PC2)^2)
+  ) %>%
+  filter(!is.na(next_month)) %>%
+  ungroup()
+```
+
+```{r, echo=FALSE}
+ggplot(centroid_shift, aes(x = month, y = shift_distance, color = sex, group = sex)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  geom_text(aes(label = next_month), vjust = -1, size = 3) +
+  theme_bw() +
+  labs(
+    title = "Centroid shift magnitude between consecutive months by sex",
+    x = "From month",
+    y = "Distance between centroids (PCoA space)"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_color_manual(values=c("deeppink","blue"))
+
+```
+
+```{r}
+# Centroid to M03====
+centroid_distance_from_M03 <- centroids %>%
+  group_by(sex) %>%
+  mutate(
+    M03_PC1 = PC1[month == "M03"],
+    M03_PC2 = PC2[month == "M03"],
+    dist_from_M03 = sqrt((PC1 - M03_PC1)^2 + (PC2 - M03_PC2)^2)
+  ) %>%
+  ungroup() %>%
+  filter(month != "M03")
+
+
+ggplot(centroid_distance_from_M03,
+       aes(x = month, y = dist_from_M03, color = sex, group = sex)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  theme_bw() +
+  labs(
+    title = "Distance from M03 centroid (by sex)",
+    x = "Month",
+    y = "Distance from M03 centroid (PCoA space)"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_color_manual(values=c("deeppink","blue"))
+```
+
+### As mice ages, within sample distances increases with time
+
+```{r}
+
+bray_dist<-phyloseq::distance(qiime_norm, method = "bray")
+samples_df$SampleID<-rownames(samples_df)
+samples_df$sex_age <-paste(samples_df$sex,samples_df$month,sep="_")
+bd <- betadisper(bray_dist, samples_df$sex_age)
+bd_df <- data.frame(
+  Distance = bd$distances,
+  Month = samples_df$month,
+  Sex = samples_df$sex, 
+  #cohort=sampledf$mousegroup.x, 
+  mouse= samples_df$mouse
+)
+
+#Optional to make a line plot with medians
+median_df <- bd_df %>%
+  group_by(Sex, Month) %>%
+  summarise(median_distance = median(Distance, na.rm = TRUE), .groups = "drop")
+
+anova(bd)
+```
+```{r}
+TukeyHSD(aov(bd$distances ~ samples_df$month))
+```
+
+```{r}
+ggplot(bd_df, aes(x = Month, y = Distance, fill = Sex)) +
+  geom_boxplot(position = position_dodge(width = 0.75)) +
+  theme_classic(base_size = 12) +
+  labs(title = "Beta Dispersion by Month and Sex",
+       x = "Month", y = "Distance to Group Centroid") +
+  scale_fill_manual(values = c("M" = "#3639ff", "F" = "deeppink")) +
+  theme(legend.position = "right")
+```
+
+#### This pattern was consistent with each cohort
+
+```{r}
+bd_df_cohort <- data.frame(
+  Distance = bd$distances,
+  Month = samples_df$month,
+  Sex = samples_df$sex, 
+  cohort=samples_df$mousegroup.x, 
+  mouse= samples_df$mouse
+)
+
+```
+```{r, echo=TRUE}
+
+ggplot(bd_df_cohort, aes(x = Month, y = Distance, fill = Sex)) +
+  geom_boxplot(position = position_dodge(width = 0.75)) +
+  theme_classic(base_size = 12) + facet_grid(~cohort)+
+  labs(title = "Beta Dispersion by Month and Sex",
+       x = "Month", y = "Distance to Group Centroid") +
+  scale_fill_manual(values = c("M" = "#3639ff", "F" = "deeppink")) +
+  theme(legend.position = "right")+theme(axis.text.x=element_blank())
+```
+
+
