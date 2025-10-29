@@ -19,6 +19,8 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## Alpha Diversity of mice based on age, sex, and cohort
 
+Based on the below results, I determined that sex difference in alpha diversity were minimal. The alpha diversity and age do not have a linear relationship. Increase in diversity was observed after 5 months old, with a moderate drop after 19 months. The effect was more in "Observed" diversity index, more so than Shannon. 
+
 ```{r}
 ## alpha diversity ====
 library(lme4)
@@ -31,6 +33,11 @@ library(emmeans)
 library(tibble)
 library(reshape2)
 library(tidyverse)
+library(qiime2R)
+library(ggpubr)
+library(ggplot2)
+
+theme_set(theme_bw())
 
 load("qiime_f.RData")  
 metadata_df<-as.data.frame(sample_data(qiime_f))
@@ -115,7 +122,7 @@ kable(summary(model1)$coefficients, digits = 4)
 
 ### Interpretation of the above table
 
-In the above, F M03 is reference. sexM result suggests at M03, Male sig. higher than female at M03 (by 0.1515). Females at M23 not significantly different between females at M03 (p=0.43). The sex difference in month 23 is significantly different from the sex difference in M03 (p=0.0122),
+In the above, F M03 is reference. sexM result suggests at M03, Male sig. higher than female at M03 (by 0.1515). Females at M07, M19, N22 were sig different from M03. The sex difference in M07(p=.004), M09 (p=0.03), M23(p=0.0122) is significantly different from the sex difference in M03 .
 
 ### ANOVA for model1 (Shannon with all cohorts)
 
@@ -208,6 +215,8 @@ From the below table:
 | sex       |    91.47856 |   91.47856 |     1 |   122 | 0.1849369 |       0.6679231 |
 | month     | 36277.26342 | 4030.80705 |     9 |   122 | 8.1488478 | 2.09e-09 \*\*\* |
 | sex:month |  6297.16741 |  699.68527 |     9 |   122 | 1.4145130 |       0.1890481 |
+
+
 
 ```{r}
 # Estimated marginal means by Sex within Month for Shannon
@@ -451,3 +460,86 @@ plot(baseline_contrasts_G3)
 ```{r emmeans_sex_within_month_G3, fig.width=5, fig.height=8, echo=TRUE}
 plot(emm_sex_within_month_G3, comparisons = TRUE)
 ```
+
+## Alpha Diversity of mice based on frailty
+
+To determine potential relationship between frailty scores and survival, I filtered the dataset to the last time point of collection
+
+```{r}
+metadata<-read.delim("Young_aging_metadata_v4.txt")
+
+# keeping only the last one per mouse
+metadata_sub <- metadata %>%
+  group_by(mouse) %>%
+  arrange(month_n, .by_group = TRUE) %>%  # ensure chronological order
+  slice_tail(n = 1) %>%                 
+  ungroup()
+```
+This results in 186 mice
+
+```{r}
+#Remove samples with no frailty information
+metadata_sub_f<-metadata_sub %>%
+  filter(frailty_physical %in% c("PF","NF","F"))
+
+write.table(metadata_sub_f,"metadata_frailty.txt",sep="\t", quote = FALSE,
+            row.names = FALSE)
+
+qiime_frail<-qza_to_phyloseq(features="Aging-table-dada2.qza",
+                       tree="rooted-tree-merged.qza",
+                       metadata="metadata_frailty.txt", taxonomy = "Aging-taxonomy-weighted_silva138-1.qza")
+
+sample_reads <- sample_sums(qiime_frail)
+sorted_reads <- sort(sample_reads)
+print(sorted_reads)
+
+qiime.rare.frail<- rarefy_even_depth(qiime_frail,sample.size = min(sample_sums(qiime_frail)))
+
+```
+### Alpha diversity 
+#### I found no association with frailty scores and microbiota
+```{r}
+metadata_df_frail<-as.data.frame(sample_data( qiime.rare.frail))
+metadata_df_frail$SampleID<-rownames(metadata_df_frail)
+metadata_df_frail<-as.matrix(metadata_df_frail)
+
+alpha.div.df.frail <- estimate_richness(
+  qiime.rare.frail, 
+  measures=c("Shannon", "Observed")) %>% 
+  rownames_to_column("SampleID") %>% 
+  merge(metadata_df_frail, by="SampleID")
+
+alpha.div.df.frail.long <- alpha.div.df.frail %>% 
+  pivot_longer(c(Shannon, Observed), names_to="metric")
+
+alpha.div.plot.df.frail <- alpha.div.df.frail.long %>%
+  arrange(metric, frailty_physical)
+
+a_my_comparisons_frail <-list(c("F","NF"),c("NF","PF"),c("PF","F"))
+symnum.args <- list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns"))
+
+alpha.div.df.frail.long%>% 
+  ggplot(aes(x=frailty_physical, y=value, color=frailty_physical))+
+geom_boxplot()+facet_wrap(~metric, scales="free")+
+  theme_set(theme_bw())+
+  theme(axis.text.x=element_text(angle=30))+
+  stat_compare_means(comparisons = a_my_comparisons_frail, symnum.args = symnum.args, method = "t.test")
+
+#No. sig difference found here
+  
+```
+```{r}
+df_wide_frail<- alpha.div.df.frail.long%>%
+  pivot_wider(names_from = metric, values_from = value)
+model_shannon_frail <- lmer(Shannon ~ frailty_physical + (1 | mousegroup.x), data = df_wide_frail)
+kable(summary(model_shannon_frail)$coefficients, digits = 4)
+```
+```{r}
+df_wide_frail$howlette_frailty<-as.numeric(df_wide_frail$howlette_frailty)
+model_shannon_hf <- lmer(Shannon ~ howlette_frailty + (1 | mousegroup.x), data = df_wide_frail)
+kable(summary(model_shannon_hf)$coefficients, digits = 4)
+```
+
+
+
+
