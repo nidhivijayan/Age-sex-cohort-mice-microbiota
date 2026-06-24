@@ -1,0 +1,98 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+```{r}
+library(Maaslin2)
+library(phyloseq)
+library(dplyr)
+library(tibble)
+library(tidyverse)
+library(ggplot2)
+```
+
+```{r}
+subset_pst_older_f1_YMM<-subset_samples(subset_pst_older_f1, MT == c("YMM"))
+subset_pst_older_f1_YMM<-prune_taxa(taxa_sums(subset_pst_older_f1_YMM) > 0, subset_pst_older_f1_YMM)
+
+otu_table <- as.data.frame(otu_table(subset_pst_older_f1_YMM))
+otu_table<-otu_table[rowSums(otu_table) >= 1, ]
+
+otu_table_df<-as.data.frame(otu_table)
+otu_table_df<-rownames_to_column(otu_table_df,"ASV")
+
+TT = tax_table(subset_pst_older_f1_YMM)
+TT = TT[, which(apply(!apply(TT, 2, is.na), 2, any))]
+tdf = data.frame(TT, OTU = taxa_names(subset_pst_older_f1_YMM))
+
+
+tdf$ASV <- rownames(tdf)
+
+pOTUtax = merge(otu_table_df, tdf, by="ASV")
+pOTUtax <- pOTUtax[pOTUtax$Genus != "Chloroplast", ]
+pOTUtax <- pOTUtax[pOTUtax$Class != "Cyanobacteriia", ]
+pOTUtax $TAX <- apply(pOTUtax [, c("Phylum", "Class", "Order","Family","Genus")], 1, function(x) paste(na.omit(x), collapse = ";"))
+
+
+# Group by Family and sum up OTU counts
+library(dplyr)
+pOTUtax_fam_summed <- pOTUtax %>%
+  group_by(ASV) %>%
+  summarise(across(where(is.numeric), sum, na.rm = TRUE))
+
+pOTUtax_fam_summed<-na.omit(pOTUtax_fam_summed)
+pOTUtax_family_input<-column_to_rownames(pOTUtax_fam_summed,"ASV")
+View(pOTUtax_family_input)
+pOTUtax_family_input_filtered <- pOTUtax_family_input[rowSums(pOTUtax_family_input) >= 5, ]
+
+# Save the summed table
+write.table(pOTUtax_family_input_filtered, "OTU_table_log_summed_by_ASV.txt", sep = "\t", quote = FALSE, col.names = NA)
+
+
+#df_input_metadata = read.table(file = "AMCohortC_lumu_meta_v2.txt", header = TRUE, row.names = 1, stringsAsFactors = FALSE)
+df_input_metadata = metadata_fmt_v1
+  read.table(file = "MT_MAmice_metadata_v2.txt", header = TRUE, row.names = 1, stringsAsFactors = FALSE)
+
+rownames(df_input_metadata)<- df_input_metadata$group
+# Extract metadata
+
+common_samples_maas <- intersect(rownames(df_input_metadata), colnames(pOTUtax_family_input_filtered))
+
+# Subset OTU table to include only common samples
+otu_table_filtered <- pOTUtax_family_input_filtered[, common_samples_maas]
+
+otu_table_transposed <- t(otu_table_filtered)
+
+# Subset metadata to include only common samples
+df_input_metadata_fil <- df_input_metadata[common_samples_maas, ]
+
+# Check the dimensions
+dim(otu_table_transposed)
+dim(df_input_metadata_fil)
+
+otu_table_transposed<-data.frame(otu_table_transposed)
+# Define the explanatory variables (covariates, treatments)
+# For example, assuming "treatment" and "age" are explanatory variables in your metadata
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# Run MaAsLin2
+maaslin_results <- Maaslin2(
+  input_data = otu_table_transposed,  # OTU table
+  input_metadata = df_input_metadata_fil,  # Metadata table
+  fixed_effects = c("sex"),  # Fixed effects (e.g., treatment, age)
+  output= "output_sex_YMM_F1MA-refFem_FMT",
+  plot_scatter = TRUE,
+  reference = c("sex,F"),
+  #random_effects = c("age_type"),
+  normalization = "CLR",analysis_method = "LM"
+)
+```
+
+Among all the Middle-aged mice from all FMTs, there were no ASVs that were significantly different by sex. 
+

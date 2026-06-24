@@ -1,0 +1,410 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+```{r}
+library(Maaslin2)
+library(phyloseq)
+library(dplyr)
+library(tibble)
+library(tidyverse)
+library(ggplot2)
+```
+
+```{r}
+load("qiime_f.RData")
+
+#TO determine change before and after antibiotics in CDI expt. Group by phylum
+cdi_s_p <- qiime_f %>% tax_glom(taxrank="Phylum")
+
+otu_table <- as.data.frame(otu_table(cdi_s_p))
+otu_table<-otu_table[rowSums(otu_table) >= 1, ]
+
+otu_table_df<-as.data.frame(otu_table)
+otu_table_df<-rownames_to_column(otu_table_df,"ASV")
+
+TT = tax_table(cdi_s_p)
+TT = TT[, which(apply(!apply(TT, 2, is.na), 2, any))]
+tdf_maa = data.frame(TT, OTU = taxa_names(cdi_s_p))
+
+tdf_maa$ASV <- rownames(tdf_maa)
+
+pOTUtax = merge(otu_table_df, tdf_maa, by="ASV")
+pOTUtax <- pOTUtax[pOTUtax$Genus != "Chloroplast", ]
+pOTUtax <- pOTUtax[pOTUtax$Class != "Cyanobacteriia", ]
+pOTUtax $TAX <- apply(pOTUtax [, c("Phylum", "Class", "Order","Family","Genus")], 1, function(x) paste(na.omit(x), collapse = ";"))
+
+
+# Group by Family and sum up OTU counts
+library(dplyr)
+pOTUtax_fam_summed <- pOTUtax %>%
+  group_by(Phylum) %>%
+  summarise(across(where(is.numeric), sum, na.rm = TRUE))
+
+pOTUtax_fam_summed<-na.omit(pOTUtax_fam_summed)
+pOTUtax_family_input<-column_to_rownames(pOTUtax_fam_summed,"Phylum")
+pOTUtax_family_input_filtered <- pOTUtax_family_input[rowSums(pOTUtax_family_input) >= 5, ]
+
+# Save the summed table
+write.table(pOTUtax_family_input_filtered, "OTU_table_log_summed_by_ASV.txt", sep = "\t", quote = FALSE, col.names = NA)
+
+
+df_input_metadata = read.table(file = "Young_aging_metadata_v4.txt", header = TRUE, row.names = 1, stringsAsFactors = FALSE)
+#df_input_metadata = read.table(file = "AMCohortC_lumu_meta_v2.txt", header = TRUE, row.names = 1, stringsAsFactors = FALSE)
+df_input_metadata = read.table(file = "CDI/CDIseverity_16S_meta.txt", header = TRUE, row.names = 1, stringsAsFactors = FALSE)
+
+# Extract metadata
+
+common_samples_maas <- intersect(rownames(df_input_metadata), colnames(pOTUtax_family_input_filtered))
+
+# Subset OTU table to include only common samples
+otu_table_filtered <- pOTUtax_family_input_filtered[, common_samples_maas]
+
+otu_table_transposed <- t(otu_table_filtered)
+
+# Subset metadata to include only common samples
+df_input_metadata_fil <- df_input_metadata[common_samples_maas, ]
+
+# Check the dimensions
+dim(otu_table_transposed)
+dim(df_input_metadata_fil)
+
+otu_table_transposed<-data.frame(otu_table_transposed)
+# Define the explanatory variables (covariates, treatments)
+# For example, assuming "treatment" and "age" are explanatory variables in your metadata
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# Run MaAsLin2
+maaslin_results <- Maaslin2(
+  input_data = otu_table_transposed,  # OTU table
+  input_metadata = df_input_metadata_fil,  # Metadata table
+  fixed_effects = c("month_n"),  # Fixed effects (e.g., treatment, age)
+  output= "output_Phylum_monthN_random-cohort_ASV_LM_CLR_BH",
+  plot_scatter = TRUE,
+  reference = c("month_n","3"),random_effects = c("mousegroup.x"),
+  normalization = "CLR",analysis_method = "LM"
+)
+
+set.seed(1)
+fit_out <- maaslin3(input_data = otu_table_transposed,
+                    input_metadata = df_input_metadata_fil,
+                    output = 'Maaslin3_output',
+                    formula = '~ month_n + (1|mouse) + (1|mousegroup.x)',
+                    normalization = 'TSS',
+                    transform = 'LOG',
+                    augment = TRUE,
+                    standardize = TRUE,
+                    max_significance = 0.1,
+                    median_comparison_abundance = TRUE,
+                    median_comparison_prevalence = FALSE,
+                    max_pngs = 250,
+                    cores = 1)
+
+```
+#Volcano plot
+```{r}
+# read the output for ASVs that change with time
+out<-read_excel("output_ASV_month_random-cohort_ASV_LM_CLR_BH/significant_results_ed.xlsx")
+
+# read the output for ASVs that differ within DN12 male mice, f vs s infection
+out<-read.delim("output_infection_male_Random-age-ASV_TSS_BH_DN12_cdi/significant_results.tsv")
+#DN12 male aged mice
+out<-read.delim("output_ASV_infection_DN12male_rnadom-cohort_CLR_BH_maxWL_cdi/significant_results.tsv")
+
+tdf_maa<-tax_table(qiime_f)
+tdf_maa<-as.data.frame(tdf_maa)
+tdf_maa$ASV<-rownames(tdf_maa)
+out_tdf_maa<-merge(out,tdf_maa,by.x="feature",by.y="ASV")
+
+out_tdf_maa$qval<-as.numeric(out_tdf_maa$qval)
+out_tdf_maa$log10q <- -log10(out_tdf_maa$qval)
+
+out_tdf_maa$log10p <- -log10(out_tdf_maa$pval)
+out_tdf_maa$color_group_genus2 <- 
+    ifelse(out_tdf_maa$qval > 0.05 | abs(out_tdf_maa$coef) < 1,
+           "grey",
+           out_tdf_maa$Genus)
+
+#Removing the coeff cutoff
+out_tdf_maa$color_group_genus2 <- 
+    ifelse(out_tdf_maa$qval > 0.05,
+           "grey",
+           out_tdf_maa$Genus)
+
+out_tdf_maa$color_group_fam <- ifelse(out_tdf_maa$qval > 0.05, "grey", out_tdf_maa$Family)
+
+pal18_okabeito <- c(
+  "#0072B2",  # blue
+  "#D55E00",  # vermillion
+  "#009E73",  # bluish green
+  "#CC79A7",  # reddish purple
+  "#F0E442",  # yellow
+  "#56B4E9",  # sky blue
+  "#E69F00",  # orange
+  "#000000",  # black
+
+  "#1B9E77",  # teal
+  "#7570B3",  # purple-blue
+  "#E7298A",  # magenta
+  "#66A61E",  # olive green
+  "#E6AB02",  # mustard
+  "grey50",  # brown
+  "#A6761D",  # dark grey
+  "red", "blue",  # <-- preserved exactly
+
+  "#8DD3C7",  # light cyan
+  "#FB8072",  # salmon
+  "#80B1D3",  # pale blue
+  "#FDB462",  # light orange
+  "#B3DE69",  # light green
+  "#FCCDE5",  # light pink
+  "#BC80BD",  # lavender
+  "#CCEBC5",  # mint
+  "#FFED6F",  # pale yellow
+
+  "#00441B",  # dark green
+  "#084081",  # dark blue
+  "#7F0000",  # dark red
+  "#4D004B"   # dark purple
+)
+
+
+mark_list<-c("922d33a2963d3e87a3d4df6b82371235","bbee9f3d2ff7eae779b70c7ac2c971e4","2cf0267a31dc6f1b8ee65c913b8f6e4d","405600e715167b5f59ca7a6438a970e2","020f48a69f9bf40e54fbac885f94695a")
+out_tdf_maa$mark_star <- ifelse(out_tdf_maa$feature %in% mark_list, "*", "")
+
+out_tdf_maa$color_group_genus2 <- ifelse(is.na(out_tdf_maa$color_group_genus2),
+                         out_tdf_maa$Family,
+                         out_tdf_maa$color_group_genus2)
+
+out_tdf_maa$color_group_genus2<- ifelse(out_tdf_maa$color_group_genus2 == "uncultured",
+                         out_tdf_maa$Family,
+                         out_tdf_maa$color_group_genus2)
+
+out_tdf_maa<-read.delim("Volcano_by_age.txt",sep = "\t")
+
+ggplot(out_tdf_maa,aes(x=coef,y=log10q, color=color_group_genus2))+
+   geom_point(size=3)+ 
+#geom_text(aes(label = mark_star),            vjust = 0.5,hjust=0.5,      # move above the point           size = 8 # adjust text size           color = "black")+
+ scale_color_manual(values = pal18_okabeito)+
+  geom_vline(xintercept = 0, linetype = "dotted", color = "black", size = 0.6) +
+  geom_hline(yintercept = 1.3, linetype = "dotted", color = "black", size = 0.6) +
+  theme(axis.text = element_text(size=12), legend.text = element_text(size=12))
+  
+```
+
+```{r}
+#This is for GI maaslin (cecum, colon, ileum)
+results<-read_excel("output_ASV_month_random-cohort_ASV_LM_CLR_BH/maaslin summary GI.xlsx")
+
+#This is for Fig. 3B
+results<-read_excel("output_ASV_month_random-cohort_ASV_LM_CLR_BH/significant_results_ed.xlsx")
+results<-read.delim("output_Phylum_DAY-00_vs_DN12_CDI_random-cohort_ASV_LM_CLR_BH/significant_results.tsv")
+
+results_tdf_maa<-merge(results,tdf_maa, by.x="feature", by.y = "ASV")
+results_tdf_maa$TAX<-  paste(results_tdf_maa$Family,results_tdf_maa$Genus,sep="_")
+
+results_tdf_maa<-results_tdf_maa %>%
+  mutate(logq = -log10(qval))
+
+ggplot(results_tdf_maa, aes(x = coef, y = logq, color = Genus)) +
+  geom_point(alpha = 0.8, size = 2) +
+  geom_vline(xintercept = c(0.9,-0.9), linetype = "dashed", color = "gray40") +
+  geom_vline(xintercept = c(0), linetype = "solid", color = "gray40") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dotted", color = "gray40") +
+  labs(x = "Effect size (coefficient)",
+       y = expression(-log[10]("q-value")),
+       title = "Volcano plot of MaAsLin2 analysis") +
+  theme(legend.position = "right")
+ # facet_wrap(~type)
+```
+```{r}
+# Make a relative abundance plot of ASVs that vary with age that have a rel abund >0.1
+
+## Add a column that says if coef is minus or plus, mergde with TAX name, and plot them separately in the figure
+
+results_tdf_maa$coef_direction<- ifelse(results_tdf_maa$coef < 0, "minus", "plus")
+
+results_tdf_maa$TAX2<-paste(results_tdf_maa$TAX,results_tdf_maa$coef_direction,sep="_")
+
+otu_table_norm <- as.data.frame(otu_table(qiime_norm))
+otu_table_norm$ASV<-rownames(otu_table_norm)
+results_tdf_maa_rel_abund<-merge(results_tdf_maa, otu_table_norm,by.x="feature",by.y="ASV")
+
+results_rel_abund <- results_tdf_maa_rel_abund %>%
+  dplyr::group_by(TAX2) %>%
+  dplyr::summarise(across(where(is.numeric), sum, na.rm = TRUE))
+
+results_rel_abund<-results_rel_abund[-c(2:8)]
+results_rel_abund$SUM<-rowSums(results_rel_abund[, 2:624], na.rm = TRUE)
+results_rel_abund$AVG <- results_rel_abund %>%
+  dplyr::select(2:624) %>%
+  dplyr::mutate(across(everything(), as.numeric)) %>%
+  rowMeans(na.rm = TRUE)
+results_rel_abund <- results_rel_abund %>%
+  arrange(desc(AVG))
+
+results_rel_abund_pt09 <- results_rel_abund %>% 
+  slice(1:13)
+
+results_rel_abund_pt09<- results_rel_abund_pt09[-c(625:626)]
+otu_long <- results_rel_abund_pt09 %>%
+  pivot_longer(
+    cols = -TAX2,
+    names_to = "sample",
+    values_to = "abundance"
+  )
+otu_long2 <- otu_long %>%
+  left_join(metadata_f, by = "sample")
+
+tax2_month_median <- otu_long2 %>%
+  dplyr::group_by(month, TAX2) %>%
+  dplyr::summarize(median_abund = mean(abundance, na.rm = TRUE), .groups = "drop")
+
+okabe_ito <- c(
+  "#E69F00", # orange
+  "#56B4E9", # sky blue
+  "#009E73", # bluish green
+  "#F0E442", # yellow
+  "#0072B2", # blue
+  "#D55E00", # vermillion
+  "#CC79A7", # reddish purple
+  "#999999" # grey
+)
+
+ggplot(tax2_month_median, aes(x = factor(month), y = median_abund, fill = TAX2)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Month", y = "Median Relative Abundance", fill = "Taxon (TAX2)") +
+  theme_bw() +scale_fill_manual(values = pal18_okabeito)+
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+```
+## Which ASVs change with sex regardless of age
+```{r}
+asv_sex<-read.delim("output_ASV_sex_random-cohort_ASV_LM_CLR_BH/significant_results.tsv")
+View(asv_sex)
+asv_sex<-merge(asv_sex,tdf_maa, by.x="feature",by.y ="ASV")
+asv_sex_sig<-asv_sex %>%
+  dplyr::filter(qval < 0.05)
+asv_sex_sig_table<-merge(asv_sex_sig,otu_table_norm_tdf_maa,by.x="OTU", by.y="ASV")
+asv_sex_sig_table$coeff <- ifelse(asv_sex_sig_table$coef < 0, "minus","plus")
+asv_sex_sig_table<-asv_sex_sig_table[-c(2:17)]
+asv_sex_sig_table$Family_coef<-paste(asv_sex_sig_table$Family.y,asv_sex_sig_table$coeff,sep="_")
+asv_sex_sig_table$Genus_coef<-paste(asv_sex_sig_table$Genus.y,asv_sex_sig_table$coeff,sep="_")
+asv_sex_sig_table<-asv_sex_sig_table[-c(625:634)]
+
+asv_sex_sig_table_t<-t(asv_sex_sig_table)
+asv_sex_sig_table_t<- asv_sex_sig_table_t %>%
+  {colnames(.) <- as.character(unlist(.[1, ])); .[-1, ]}
+asv_sex_sig_table_t<-as.data.frame(asv_sex_sig_table_t)
+asv_sex_sig_table_t$SampleID <- rownames(asv_sex_sig_table_t)
+
+categories <- as.character(asv_sex_sig_table_t[nrow(asv_sex_sig_table_t), ])
+df_data <- asv_sex_sig_table_t[-nrow(asv_sex_sig_table_t), ]
+df_list <- lapply(unique(categories), function(cat) {
+  df_data[, categories == cat, drop = FALSE]
+})
+
+df_list_meta <- lapply(df_list, function(df) {
+  df %>%
+    rownames_to_column("SampleID") %>%
+    left_join(
+      metadata_f %>% select(SampleID, sex, month_n),
+      by = "SampleID"
+    )
+})
+
+otu_cols <- function(df) {
+  setdiff(names(df), c("SampleID", "month", "month_n", "sex"))
+}
+
+summary_list <- imap(df_list_meta, ~ {
+  .x %>%
+    pivot_longer(
+      cols = all_of(otu_cols(.x)),
+      names_to = "OTU",
+      values_to = "rel_abundance"
+    ) %>%
+    mutate(rel_abundance = as.numeric(rel_abundance)) %>%
+    group_by(month_n, sex) %>%
+    summarise(
+      mean_abundance = mean(rel_abundance, na.rm = TRUE),
+      n = sum(!is.na(rel_abundance)),
+      .groups = "drop"
+    ) %>%
+    mutate(category = .y)
+})
+
+plot_list <- imap(summary_list, ~ {
+  dfp <- .x %>%
+    mutate(month_n = as.numeric(as.character(month_n))) %>%
+    filter(is.finite(month_n), is.finite(mean_abundance))
+
+  ggplot(dfp, aes(x = month_n, y = mean_abundance, color = sex)) +
+    geom_smooth() +
+    labs(
+      title = paste("Category:", .y),
+      x = "Month",
+      y = "Mean relative abundance"
+    ) + scale_color_manual(values=c("deeppink","#3639ff"))
+})
+
+plot_list[[1]]
+
+
+plot_list[[1]]
+```
+# ASVs in FMT that correlate with baseline age
+```{r}
+df1<-read_excel("output_MT_F1-refYMM-MAged_FMT/subset_results.xlsx")
+df1<-merge(df1,tdf_maa, by="ASV")
+norm_table<-otu_table(fmt_norm)
+norm_table<-as.data.frame(norm_table)
+norm_table$ASV<-rownames(norm_table)
+df2<-merge(df1,norm_table,by="ASV")
+df2<-df2[-c(2:8)]
+df2_long <- df2 %>%
+  tidyr::pivot_longer(
+    cols = where(is.numeric),
+    names_to = "SampleID",
+    values_to = "abundance"
+  )
+metadata_fmt<-read.delim("MT_MAmice_metadata_v3.txt")
+df2_long<-merge(df2_long,metadata_fmt,by="SampleID")
+
+df2_long<-filter(df2_long, df2_long$MT != "AFM2")
+
+df2_long<-filter(df2_long, df2_long$age_type == "D_middle_aged")
+
+ggplot(df2_long, aes(x = MT, y = abundance, fill = MT)) +
+    geom_boxplot() +
+    facet_wrap(~ ASV, scales = "free_y")
+
+```
+```{r}
+df2_long_avg <- df2_long %>%
+  group_by(ASV, MT) %>%
+  summarise(mean_rel = mean(abundance), .groups = "drop") #%>%
+ 
+   mutate(MT_sex = paste(MT, sex, sep = "_"))
+
+mat <- df2_long_avg %>%
+  select(ASV, MT, mean_rel) %>%
+  pivot_wider(
+    id_cols = ASV,
+    names_from = MT,
+    values_from = mean_rel,
+    values_fill = list(mean_rel = 0)
+  ) %>%
+  column_to_rownames("ASV") %>%
+  as.matrix()
+pheatmap::pheatmap(log10(mat + 1e-6), scale = "row", cluster_rows = FALSE)
+```
+

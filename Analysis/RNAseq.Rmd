@@ -1,0 +1,360 @@
+---
+title: "RNAseq"
+author: "Nidhi Vijayan"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    number_sections: true
+    theme: flatly
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+---
+
+```{r library load, message=FALSE, warning=FALSE}
+library(biomaRt)
+library(DESeq2)
+library(tibble)
+library(dplyr)
+library(reshape2)
+library(ggplot2)
+library(vegan)
+library(RColorBrewer)
+library(ggokabeito)
+
+```
+
+```{r load data,  message=FALSE, warning=FALSE}
+counts<-read.table("gene_expected_count.annot.txt", header = TRUE,row.names = "gene_id",check.names = FALSE)
+metadata_rna<-read.delim("metadata_RNAseq.txt",header=TRUE)
+anno<-read.delim("gene.annot.txt",header=TRUE)
+keep_samples <- intersect(metadata_rna$sampleID, colnames(counts))
+counts   <- counts[, keep_samples, drop = FALSE]
+counts2 <- counts[rowSums(counts) != 0, ]
+
+#Replace Ensembl geneID to gene names
+counts2<-rownames_to_column(counts2,"geneID")
+counts_anno<-merge(counts2,anno,by.x="geneID",by.y="gene_id")
+counts_anno$external_gene_name <- make.unique(counts_anno$external_gene_name, sep = "_")
+counts_anno<-column_to_rownames(counts_anno,"external_gene_name")
+counts_anno<-counts_anno[-c(1, 22:23)]
+```
+```{r deseq age}
+dds<-DESeqDataSetFromMatrix(countData = counts_anno,colData = metadata_rna, design=~age)
+dds_deseq_age <- DESeq(dds)
+
+#filtering out low read
+keep_all <- rowSums(counts(dds_deseq_age) >= 10)>=4 #removes counts with < 1 in less than 5 samples. You can play around with this. 
+dds_deseq_age <- dds_deseq_age[keep_all, ]
+save(dds_deseq_age,file="dds_deseq_age.RData")
+
+res_age<-results(dds_deseq_age,contrast=c("age", "young", "aged"),alpha=0.05)
+summary(res_age)
+```
+```{r}
+res_age_df<- as.data.frame(res_age)
+View(res_age_df)
+res_age_df$gene<-rownames(res_age_df)
+
+res_top <- res_age_df %>%
+  bind_rows(
+    slice_max(., log2FoldChange, n = 5),
+    slice_min(., log2FoldChange, n = 5)
+  ) %>%
+  mutate(
+    gene = reorder(gene, log2FoldChange),
+    direction = ifelse(log2FoldChange >= 0, "Young", "Aged")
+  )
+
+
+res_top <- res_age_df %>%
+  arrange(log2FoldChange) %>%
+  slice(c(1:10, (n()-10):n()))  # Top 5 and bottom 5 based on sorted X
+
+res_top$direction<-ifelse(res_top$log2FoldChange>0, "Young", "Aged")
+
+b1 <- ggplot(res_top, aes(x = log2FoldChange, y = reorder(gene, log2FoldChange), fill=direction)) +
+  geom_col() +
+  scale_fill_manual(values = c("Young" = "steelblue", "Aged" = "darkorange")) +
+  #scale_color_okabe_ito()+
+  labs(
+    x = "log2 Fold Change",
+    y = "Gene"
+  ) +theme_bw()
+```
+
+```{r deseq female}
+
+```
+
+
+## MDS analysis
+```{r plot MDS}
+# Get variance-stabilized expression values
+vsd_all <- vst(dds_deseq_age)
+vsd_mat <- assay(vsd_all)
+
+# Compute sample distances (use same method as clustering)
+dist_mat <- dist(t(assay(vsd_all)), method = "euclidean")  # or try "correlation"
+
+# Classical MDS (metric)
+mds <- cmdscale(dist_mat, k = 2, eig = TRUE)
+
+# Create data frame for ggplot
+mds_df <- data.frame(
+  Dim1 = mds$points[,1],
+  Dim2 = mds$points[,2],
+  condition = colData(dds_deseq_age)$age,
+  sex = colData(dds_deseq_age)$sex
+)
+
+# Plot
+ggplot(mds_df, aes(x = Dim1, y = Dim2, color = condition, shape=sex)) +
+  geom_point(size = 4) +scale_color_okabe_ito() +
+  theme_set(theme_bw()) +
+  #scale_fill_manual(values=Okabe_Ito)+
+  #guides(fill = guide_legend(override.aes = list(color = Okabe_Ito)))+
+  labs(title = "MDS (classical scaling) of samples",
+       x = paste0("Dimension 1 (", round(mds$eig[1] / sum(mds$eig) * 100, 1), "%)"),
+       y = paste0("Dimension 2 (", round(mds$eig[2] / sum(mds$eig) * 100, 1), "%)"))+stat_ellipse(aes(linetype = condition), size = 1)
+
+```
+## PCA analysis
+```{r plotpca}
+pcaData<-plotPCA(vsd_all,intgroup=c("age"),returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+group_sample<-metadata_rna$sex
+group_sample<-factor(group_sample)
+
+pca_all <- ggplot(pcaData, aes(PC1, PC2, color = group_sample, fill = group_sample, shape=age)) +
+  scale_fill_manual(values = c("deeppink","#3639ff")) +
+  scale_color_manual(values = c("deeppink","#3639ff")) +  # Ensures colors match
+  geom_point(size = 4, stroke = 0.6) +  # Ensure shape supports fill
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 12), axis.title=element_text(size=13),
+        legend.text = element_text(size = 12), 
+        legend.key.size = unit(2, "lines"))  + 
+  stat_ellipse(aes(linetype = age), size = 1)
+
+pca_all
+```
+```{r gene-top-pca}
+# Perform PCA with scaling
+pca_res <- prcomp(t(vsd_mat), scale. = TRUE)
+
+# Gene loadings (rotation) tell you how much each gene contributes to each PC
+gene_loadings <- as.data.frame(pca_res$rotation)
+gene_loadings$gene <- rownames(gene_loadings)
+
+top_pc1 <- gene_loadings %>%
+  arrange(desc(abs(PC1))) %>%
+  slice_head(n = 20)
+
+top_pc2 <- gene_loadings %>%
+  arrange(desc(abs(PC2))) %>%
+  slice_head(n = 20)
+
+ggplot(top_pc1, aes(x = reorder(gene, PC1), y = PC1)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Top genes driving PC1", y = "PC1 loading", x = "Gene")
+
+ggplot(top_pc2, aes(x = reorder(gene, PC2), y = PC2)) +
+  geom_bar(stat = "identity", fill = "darkorange") +
+  coord_flip() +
+  labs(title = "Top genes driving PC2", y = "PC2 loading", x = "Gene")
+```
+## PERMANOVA
+```{r adonis}
+d <- dist(t(assay(vsd_all)))
+adonis2(d ~ sex + age , data = colData(vsd_all), by="margin")
+```
+## No. of up-regulated genes unique and shared
+### Subset to males
+```{r subset to male}
+# subset data to male and females
+meta_male<-subset.data.frame(metadata_rna, sex == "Male")
+keep_samples_M <- intersect(meta_male$sampleID, colnames(counts))
+counts_M   <- counts_anno[, keep_samples_M, drop = FALSE]
+dds_M<-DESeqDataSetFromMatrix(countData = counts_M,colData = meta_male, design=~age)
+dds_deseq_M <- DESeq(dds_M)
+keep_M <- rowSums(counts(dds_deseq_M) >= 10)>=3 #removes counts with < 1 in less than 3 samples.
+dds_filtered_M <- dds_deseq_M[keep_M, ]
+res_M<-results(dds_filtered_M, contrast=c("age", "young", "aged"),alpha=0.05)
+summary(res_M)
+res_M_df<- as.data.frame(res_M)
+res_M_df$gene<-rownames(res_M_df)
+res_M_df <- filter(res_M_df, padj < 0.05)
+View(res_M_df)
+```
+### Subset to females
+```{r subset to female}
+# subset data to females
+meta_female<-subset.data.frame(metadata_rna, sex == "Female")
+keep_samples_F <- intersect(meta_female$sampleID, colnames(counts))
+counts_F   <- counts_anno[, keep_samples_F, drop = FALSE]
+dds_F<-DESeqDataSetFromMatrix(countData = counts_F,colData = meta_female, design=~age)
+dds_deseq_F <- DESeq(dds_F)
+keep_F <- rowSums(counts(dds_deseq_F) >= 10)>=3 #removes counts with < 1 in less than 2 samples. 
+dds_filtered_F <- dds_deseq_F[keep_F, ]
+res_F<-results(dds_filtered_F, contrast=c("age", "young", "aged"),alpha=0.05)
+summary(res_F)
+res_F_df<- as.data.frame(res_F)
+View(res_F_df)
+res_F_df$gene<-rownames(res_F_df)
+res_F_df <- filter(res_F_df, padj < 0.05)
+```
+# How did DE genes very within sexes
+```{r}
+merge_DE_sex<-merge(res_F_df,res_M_df,by="gene")
+filtered_merge_DE_sex <- merge_DE_sex[merge_DE_sex$log2FoldChange.x < -1 & merge_DE_sex$log2FoldChange.y > -1, ]
+```
+
+
+```{r deseq_sex}
+dds_sex<-DESeqDataSetFromMatrix(countData = counts_anno,colData = metadata_rna, design=~sex)
+dds_deseq_sex <- DESeq(dds_sex)
+
+#filtering out low read
+keep_all_sex <- rowSums(counts(dds_deseq_sex) >= 5)>=4 #removes counts with < 1 in less than 5 samples. 
+dds_deseq_sex <- dds_deseq_sex[keep_all_sex, ]
+res_sex<-results(dds_deseq_sex,contrast=c("sex", "Female", "Male"),alpha=0.05)
+summary(res_sex)
+```
+# Subset to young
+```{r deseq_young}
+meta_young<-subset.data.frame(metadata_rna, age == "young")
+keep_samples_y <- intersect(meta_young$sampleID, colnames(counts))
+counts_y   <- counts[, keep_samples_y, drop = FALSE]
+dds_young<-DESeqDataSetFromMatrix(countData = counts_y,colData = meta_young, design=~sex)
+dds_deseq_young <- DESeq(dds_young)
+keep_y <- rowSums(counts(dds_deseq_young) >= 1)>=3 #removes counts with < 1 in less than 2 samples. 
+dds_filtered_y <- dds_deseq_young[keep_y, ]
+res_young<-results(dds_filtered_y, contrast=c("sex", "Female", "Male"),alpha=0.05)
+summary(res_young)
+```
+# Subset to old
+```{r deseq_age}
+meta_age<-subset.data.frame(metadata_rna, age == "aged")
+keep_samples_a <- intersect(meta_age$sampleID, colnames(counts))
+counts_a   <- counts[, keep_samples_a, drop = FALSE]
+dds_aged<-DESeqDataSetFromMatrix(countData = counts_a,colData = meta_age, design=~sex)
+dds_deseq_aged <- DESeq(dds_aged)
+keep_a <- rowSums(counts(dds_deseq_aged) >= 1)>=3 #removes counts with < 1 in less than 2 samples. 
+dds_filtered_a <- dds_deseq_aged[keep_a, ]
+res_aged<-results(dds_filtered_a, contrast=c("sex", "Female", "Male"),alpha=0.05)
+summary(res_aged)
+```
+```{r function for up-list}
+get_sig_genes <- function(res, padj_cutoff = 0.05, direction = "up") {
+  if (!direction %in% c("up", "down")) {
+    stop("direction must be either 'up' or 'down'")
+  }
+  
+  if (direction == "up") {
+    genes <- rownames(res[which(res$padj < padj_cutoff & res$log2FoldChange > 0), ])
+  } else {
+    genes <- rownames(res[which(res$padj < padj_cutoff & res$log2FoldChange < 0), ])
+  }
+  
+  return(genes)
+}
+
+male_young<-get_sig_genes(res_M,direction="up")
+male_aged<-get_sig_genes(res_M,direction="down")
+
+female_young<-get_sig_genes(res_F,direction="up")
+female_aged<-get_sig_genes(res_F,direction="down")
+
+ female<-get_sig_genes(res_sex,direction="up")
+ male<-get_sig_genes(res_sex,direction="down")
+
+young_all<-get_sig_genes(res_age,direction="up")
+aged_all<-get_sig_genes(res_age,direction="down")
+
+young_sex<-get_sig_genes(res_young,direction="up")
+
+no_of_genes <- function(...) {
+  lists <- list(...)
+  list_names <- as.character(substitute(list(...)))[-1]
+  
+  data.frame(
+    category = list_names,
+    count = sapply(lists, length)
+  )
+}
+
+gene_counts <- no_of_genes(male_young, male_aged, female_young, female_aged)
+
+gene_counts <- gene_counts %>%
+  mutate(facet = c("male", "male", "female", "female"))
+
+         
+ggplot(gene_counts,aes(x=category,y=count,fill=category))+
+  geom_bar(stat="identity")+
+  facet_wrap(~facet,scales="free",nrow=1)+
+  theme(legend)+
+  guides(fill="none")+
+  scale_fill_manual(values=c("orange","deeppink","pink","hotpink","#3639ff","navyblue","#4B85CC","#3FAB68", "skyblue"))+
+  ggtitle("Number of Genes upregulated in each comparison")
+```
+
+#PERMDISP on aged mice
+```{r}
+#  restricted to top variable genes to stabilize distances
+top_n <- 500
+
+vsd_old<-vst(dds_filtered_a)
+vsd_mat_old<-assay(vsd_old)
+
+rv <- rowVars(vsd_mat_old)                # variance per gene across samples
+keep <- order(rv, decreasing = TRUE)[seq_len(min(top_n, length(rv)))]
+X_use <- vsd_mat_old[keep, , drop = FALSE]
+
+```
+```{r}
+#Calculated distance matrix 
+d <- dist(t(X_use), method = "euclidean") 
+
+# ---- 5) PERMDISP / betadisper ----
+
+grp <- metadata_rna_v2[colnames(X_use), "sex"]
+grp <- droplevels(factor(grp))
+
+bd <- betadisper(d, group = grp)            # distances to group centroid
+anova_bd <- anova(bd)                       # parametric test
+perm_bd  <- permutest(bd, permutations = 999)  # permutation test (preferred)
+
+print(anova_bd)
+print(perm_bd)
+```
+```{r}
+pw <- TukeyHSD(bd)
+
+# ---- 8) Extract distance-to-centroid for downstream modeling/plotting ----
+dist_to_centroid <- data.frame(
+  sample = names(bd$distances),
+  group  = grp,
+  dist   = bd$distances
+)
+
+# Boxplot
+ggplot(dist_to_centroid, aes(x = group, y = dist)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.15, height = 0, alpha = 0.7) +
+  theme_classic() +
+  labs(x = NULL, y = "Distance to group centroid (Euclidean on VST)")
+```
+
+

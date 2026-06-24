@@ -1,0 +1,339 @@
+---
+title: "WGCNA"
+author: "Nidhi Vijayan"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r lib, message=FALSE, warning=FALSE}
+# Load required libraries
+library(WGCNA)
+library(tidyverse)
+library(reshape2)
+library(ggnewscale)
+library(svglite)
+library(DESeq2)
+library(pheatmap)
+library(corrplot)
+library(Hmisc)
+
+
+enableWGCNAThreads()
+metadata_rna<-read.delim("metadata_RNAseq.txt",header=TRUE)
+```
+
+```{r data prep}
+load("dds_deseq_age.RData") #From RNAseq all the 20 samples
+wpn_vsd <- getVarianceStabilizedData(dds_deseq_age)
+rv_wpn <- rowVars(wpn_vsd)
+print(summary(rv_wpn))
+
+# Filter genes by variance (80th percentile)
+q80_wpn <- quantile(rv_wpn, 0.80)
+expr_normalized <- wpn_vsd[rv_wpn > q80_wpn, ]
+expr_normalized_v2 <- expr_normalized[, !colnames(expr_normalized) %in% c("13375-NN-12","13375-NN-8")] #these two samples were removed since they were outliers from the below tree
+
+# Prepare input matrix
+input_mat <- t(expr_normalized) #6544 genes
+
+sampleTree <- hclust(dist(input_mat), method = "average") #Clustering samples based on distance 
+
+#Setting the graphical parameters
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+
+#Plotting the cluster dendrogram
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5,
+     cex.axis = 1.5, cex.main = 2)
+```
+
+Sample outliers #8 and #12 were then removed.
+
+```{r remove outliers}
+# Prepare input matrix
+input_mat <- t(expr_normalized_v2) #6544 genes
+
+sampleTree <- hclust(dist(input_mat), method = "average") #Clustering samples based on distance 
+
+#Setting the graphical parameters
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+
+#Plotting the cluster dendrogram
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5,
+     cex.axis = 1.5, cex.main = 2)
+```
+
+```{r soft thresh, message=FALSE, warning=FALSE}
+# 2. SOFT THRESHOLD SELECTION
+powers <- c(1:10, seq(12, 20, 2))
+sft <- pickSoftThreshold(
+  input_mat,
+  blockSize = 30,
+  powerVector = powers,
+  verbose = 5
+)
+
+# Plot scale independence and mean connectivity
+par(mfrow = c(1, 2))
+cex1 <- 0.9
+
+# Scale independence plot
+df <- data.frame(
+  power = sft$fitIndices[,1],
+  R2 = -sign(sft$fitIndices[,3]) * sft$fitIndices[,2]
+)
+
+ggplot(df, aes(x = power, y = R2)) +
+  geom_point() +
+  geom_text(aes(label = powers), color = "red", vjust = -0.5) +
+  geom_hline(yintercept = 0.5, color = "red") +
+  labs(x = "Soft Threshold (power)",
+       y = "Scale Free Topology Model Fit, signed R²",
+       title = "Scale independence") +
+  theme_bw()
+```
+
+```{r mean connect}
+# Mean connectivity plot
+df_mean_connect<-data.frame(
+  power = sft$fitIndices[,1],
+  R2 = sft$fitIndices[,5]
+)
+
+ggplot(df_mean_connect, aes(x = power, y = R2)) +
+  geom_point() +
+  geom_text(aes(label = powers), color = "red", vjust = -0.5) +
+  geom_hline(yintercept = 100, color = "red") +
+  labs(x = "Soft Threshold (power)",
+       y = "Mean Connectivity",
+       title = "Mean connectivity") +
+  theme_bw()
+
+```
+
+### WGCNA dendrogram
+
+```{r netwk, message=FALSE, warning=FALSE}
+picked_power <- 9
+
+# Handle namespace conflict
+temp_cor <- cor
+cor <- WGCNA::cor
+
+netwk <- blockwiseModules(
+  input_mat,
+  power = picked_power,
+  networkType = "signed",
+  deepSplit = 2,
+  pamRespectsDendro = FALSE,
+  minModuleSize = 30,
+  maxBlockSize = 4000,
+  reassignThreshold = 0,
+  mergeCutHeight = 0.25,
+  saveTOMs = TRUE,
+  saveTOMFileBase = "ER",
+  numericLabels = TRUE,
+  verbose = 3
+)
+
+# Restore original cor function
+cor <- temp_cor
+
+```
+
+```{r module vis}
+# Convert to colors and plot dendrogram
+mergedColors <- labels2colors(netwk$colors)
+
+plotDendroAndColors(
+  netwk$dendrograms[[1]],
+  mergedColors[netwk$blockGenes[[1]]],
+  "Module colors",
+  dendroLabels = FALSE,
+  hang = 0.03,
+  addGuide = TRUE,
+  guideHang = 0.05
+)
+
+```
+
+### WGCNA heatmap
+
+```{r modul2df}
+# Create module data frame
+module_df <- data.frame(
+  gene_id = names(netwk$colors),
+  colors = labels2colors(netwk$colors)
+)
+
+# Save module assignments
+write_delim(module_df, "gene_modules_stpwr9-v3.txt", delim = "\t")
+```
+
+```{r eigen-gene analysis}
+# 5. MODULE EIGENGENE ANALYSIS
+MEs0 <- moduleEigengenes(input_mat, mergedColors)$eigengenes
+MEs0 <- orderMEs(MEs0)
+module_order <- gsub("ME", "", names(MEs0))
+
+# Prepare data for heatmap
+MEs0$SampleID <- rownames(MEs0)
+
+mME <- MEs0 %>%
+  pivot_longer(-SampleID) %>%
+  mutate(
+    name = gsub("ME", "", name),
+    name = factor(name, levels = module_order),
+    value = as.numeric(value)
+  )
+
+# Create heatmap matrix
+value_matrix <- dcast(mME, name ~ SampleID, value.var = "value")
+
+save(value_matrix,file="value_matrix.RData")
+load("value_matrix.RData")
+# Cluster rows and columns
+row_dist <- dist(value_matrix[, -1], method = "euclidean")
+row_hclust <- hclust(row_dist)
+col_dist <- dist(t(value_matrix[, -1]), method = "euclidean")
+col_hclust <- hclust(col_dist)
+
+# Reorder matrix
+value_matrix_clustered <- value_matrix[rev(row_hclust$order), 
+                                       c(1, col_hclust$order + 1)]
+
+# Merge with metadata for annotation
+melted_data <- melt(value_matrix_clustered, id.vars = "name") %>%
+  merge(metadata_rna, by.x = "variable", by.y = "sampleID")
+
+sample_annot <- unique(melted_data[, c("variable", "sex", "age")])
+
+# 6. CREATE HEATMAP WITH TRAIT ANNOTATIONS
+my_cols <- c(
+  "#5e4fa2",  # purple
+  "#4f86c6",  # blue
+  "#66c2a5",  # teal
+  "#abdda4",  # green
+  "#e6f598",  # yellow-green
+  "#ffffbf",  # pale yellow center
+  "#f6c36b",  # orange
+  "#f46d43",  # orange-red
+  "#d53e4f",  # red
+  "#9e0142"   # magenta
+)
+h1 <- ggplot(melted_data, aes(x = variable, y = name, fill = value)) +
+  geom_tile() +
+  theme_bw() +
+  #scale_fill_gradient2(low = "#5e4ea1", high = "#9e0041", mid = "#ffffbf", midpoint = 0, limit = c(-1, 1)) +
+ #scale_fill_gradientn(colors = rev(divergingx_hcl(11, palette = "Spectral")),limits = c(-1, 1), oob = scales::squish,name = "Correlation") +
+  scale_fill_gradientn(
+    colours = my_cols,
+    limits = c(-1, 1),
+    values = scales::rescale(c(
+      -1, -0.75, -0.5, -0.25, -0.1,
+       0,
+       0.1, 0.4, 0.7, 1
+    )))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  new_scale_fill() +
+  geom_tile(data = sample_annot, 
+            aes(x = variable, y = 0, fill = sex), inherit.aes = FALSE) +
+  geom_tile(data = sample_annot, 
+            aes(x = variable, y = -1, fill = age), inherit.aes = FALSE)
+h1
+ggsave("WGCNA main heatmap_v3.svg", h1)
+```
+
+The grey module appears to be sex associated, whereas yellow and blue are strongly age associated
+
+### Module trait correlation
+```{r}
+metadata_rna$sex_age<-paste(metadata_rna$sex,metadata_rna$age,sep="_")
+
+rownames(metadata_rna)<-metadata_rna$sampleID
+wgcna_matrix<-t(value_matrix_clustered)
+colnames(wgcna_matrix) <- wgcna_matrix[1, ]
+wgcna_matrix <- wgcna_matrix[-1, ]
+common_samples <- intersect(rownames(wgcna_matrix), rownames(metadata_rna))
+wgcna_matrix <- wgcna_matrix[common_samples, ]
+wgcna_matrix <- as.data.frame(wgcna_matrix)
+wgcna_matrix[] <- lapply(wgcna_matrix, function(x) as.numeric(as.character(x)))
+
+trait_df <- metadata_rna[common_samples, , drop = FALSE]
+
+# convert trait to numeric if categorical
+trait_numeric <- as.numeric(factor(trait_df$age))
+
+# run correlations (Pearson or Spearman)
+cor_results <- cor(wgcna_matrix, trait_numeric, use = "pairwise.complete.obs", method = "spearman")
+
+# get p-values
+p_values <- corPvalueStudent(cor_results, nSamples = nrow(wgcna_matrix))
+
+names(cor_results) <- colnames(wgcna_matrix)
+cor_df <- data.frame(
+  Module = names(cor_results),
+  Correlation = cor_results,
+  Trait = "sex"
+)
+cor_df <- cor_df[order(-abs(cor_df$Correlation)), ]
+pheatmap(cor_results,
+         color = colorRampPalette(c("blue", "white", "red"))(50),
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         main = "Module–Trait Correlation")
+```
+
+### No. of genes per module
+
+```{r mod_no.}
+# 7. MODULE GENE COUNTS
+module_gene_counts_df <- table(netwk$colors) %>%
+  as.data.frame() %>%
+  setNames(c("module", "gene_count")) %>%
+  mutate(module_color = labels2colors(as.numeric(as.character(module))))
+
+# Plot module sizes
+ggplot(module_gene_counts_df, 
+       aes(x = reorder(module_color, -gene_count), y = gene_count, 
+           fill = module_color)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Module", y = "Number of Genes", 
+       title = "Number of Genes in Each WGCNA Module") +
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_fill_identity() +
+  theme_bw()
+```
+
+```{r extract-genes, include=FALSE}
+# 8. EXTRACT GENES FROM SPECIFIC MODULE
+module_number <- 8
+genes_in_module <- names(netwk$colors)[netwk$colors == module_number]
+module_anno <- data.frame(gene_id = genes_in_module)
+View(module_anno)
+write.table(module_anno, 
+            file = paste0("genes_in_module_pink", module_number, "_sftpwr9-deseq_all.txt"))
+
+```
+```{r}
+plotEigengeneNetworks(MEs, "Eigengene adjacency heatmap")
+```
+
+
+
+
+

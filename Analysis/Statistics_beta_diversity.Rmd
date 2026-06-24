@@ -1,0 +1,418 @@
+---
+title: "Statistical Analysis of beta diversity"
+author: "Nidhi Vijayan"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    number_sections: true
+    theme: flatly
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## PERMANOVA on Bray-Curtis distance
+
+```{r bray-dist, message=FALSE, warning=FALSE}
+library(phyloseq)
+library(vegan)
+library(pairwiseAdonis)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(tidyr)
+library(tinytex)
+theme_set(theme_bw())
+
+load("qiime_norm.RData")
+load("qiime_f.RData")
+
+samples_df<-as.matrix(sample_data(qiime_norm))
+samples_df<-as.data.frame(samples_df)
+samples_df$sex_month <-paste(samples_df$sex,samples_df$month,sep="_")
+bray_dist_matrix<-phyloseq::distance(qiime_norm, method ="bray")
+```
+
+```{r adonis1}
+adonis2(bray_dist_matrix ~ mousegroup.x + month+sex, data = samples_df, permutations = 999, strata = samples_df$mouse, by="terms")
+
+```
+```{r}
+bd1<-betadisper(bray_dist_matrix, samples_df$mousegroup.x)
+anova(bd1)
+```
+
+```{r adonis2}
+adonis2(bray_dist_matrix ~ mousegroup.x + month*sex, data = samples_df, permutations = 999, strata = samples_df$mouse, by="terms")
+
+```
+
+```{r adonis3}
+adonis2(bray_dist_matrix ~ mousegroup.x + month+sex, data = samples_df, permutations = 999, strata = samples_df$mouse, by="margin")
+
+```
+```{r adonis4}
+adonis2(bray_dist_matrix ~ mouse+month+sex, data = samples_df, permutations = 999, by="margin")
+
+```
+```{r}
+adonis2(bray_dist_matrix ~ mouse+mousegroup.x+month+sex, data = samples_df, permutations = 999, by="margin")
+```
+
+```{r unifrac, message=FALSE, warning=FALSE}
+wuf_dist_matrix<-phyloseq::distance(qiime_norm, method ="unifrac",weighted=TRUE)
+```
+
+```{r adonis1_wuf}
+adonis2(wuf_dist_matrix ~ mousegroup.x + month+sex, data = samples_df, permutations = 999, strata = samples_df$mouse, by="terms")
+```
+```{r jacard, message=FALSE, warning=FALSE}
+jac_dist_matrix<-phyloseq::distance(qiime_norm, method ="jaccard")
+```
+
+```{r adonis1_jac}
+adonis2(jac_dist_matrix ~ mousegroup.x + month+sex, data = samples_df, permutations = 999, strata = samples_df$mouse, by="terms")
+```
+```{r adonis1_jac_int}
+adonis2(jac_dist_matrix ~ mousegroup.x + month*sex, data = samples_df, permutations = 999, strata = samples_df$mouse, by="terms")
+```
+
+```{r pair-adonis}
+pair_results<-pairwise.adonis(bray_dist_matrix, samples_df$sex_month)
+pairwise_long <- pair_results %>%
+  separate(pairs, into = c("Group1", "Group2"), sep = " vs ") %>%
+  mutate(sig_label = ifelse(p.adjusted < 0.05, "*", "ns"))
+
+#no relationship was significant
+ggplot(pairwise_long, aes(x = Group1, y = Group2, fill = R2)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sig_label), color = "black", size = 0.5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  coord_fixed() +
+  theme_minimal() +
+  labs(title = "Pairwise PERMANOVA (Bray–Curtis)",
+       fill = "R²") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r}
+pair_results_time<-pairwise.adonis(bray_dist_matrix, samples_df$month)
+pair_results_time
+```
+
+### PERMANOVA by sex at each month
+
+```{r}
+adonis_by_group <- function(physeq_obj, group_var = "month", formula = "sex", dist_method = "bray") {
+  
+  sample_df <- data.frame(sample_data(physeq_obj))
+  if(!group_var %in% colnames(sample_df)) stop(paste("Variable", group_var, "not found in sample_data"))
+  
+  groups <- unique(sample_df[[group_var]])
+  
+  results_list <- lapply(groups, function(g) {
+    # Identify sample names for this group
+    keep_samples <- rownames(sample_df[sample_df[[group_var]] == g, ])
+    
+    # Subset using sample_names()
+    phy_sub <- prune_samples(keep_samples, physeq_obj)
+    
+    # Normalize
+    phy_norm <- transform_sample_counts(phy_sub, function(x) x / sum(x))
+    
+    # Distance
+    dist_mat <- phyloseq::distance(phy_norm, method = dist_method)
+    
+    # Metadata
+    df <- data.frame(sample_data(phy_sub))
+    
+    # ✅ Check for single-level variable (goes HERE)
+    formula_var <- all.vars(as.formula(paste("~", formula)))[1]
+    if (length(unique(df[[formula_var]])) < 2) {
+      message(paste("Skipping", g, "because", formula_var, "has only one level"))
+      return(NULL)
+    }
+    
+    # Run adonis2 safely
+    a <- adonis2(as.formula(paste("dist_mat ~", formula)), data = df, by = "margin")
+    
+    # Extract R2 and p-values
+    data.frame(
+      group = g,
+      term = rownames(a),
+      R2 = a$R2,
+      p.value = a$`Pr(>F)`
+    )
+  })
+  
+  results_df <- dplyr::bind_rows(results_list)
+  return(results_df)
+}
+
+
+
+adonis_results <- adonis_by_group(qiime_norm,"month_n", formula = "mousegroup.x + sex")
+adonis_results<- adonis_results %>%
+  filter(term== c("sex"))
+
+```
+
+```{r}
+adonis_results_cohort <- adonis_by_group(qiime_norm,"month_n", formula = "mousegroup.x")
+adonis_results_cohort<- adonis_results_cohort %>%
+  filter(term== c("mousegroup.x"))
+
+```
+
+### PERMANOVA summary of sex diff by month
+
+```{r plot adonis}
+ggplot(adonis_results, aes(x=group, y=R2, color=p.value)) +
+  geom_point(alpha=0.7, size=3)+
+  #geom_segment( aes(xend=group,yend=0)) +
+  scale_color_gradient(low="black", high="#218d96")+
+  theme(axis.text=element_text(size=12))+
+  geom_smooth()
+```
+
+### PERMANOVA summary of cohort diff by month
+
+```{r plot adonis2}
+ggplot(adonis_results_cohort, aes(x=group, y=R2, color=p.value)) +
+  geom_point(alpha=0.7, size=3)+
+  #geom_segment( aes(xend=group,yend=0)) +
+  scale_color_gradient(low="black", high="#218d96")+
+  theme(axis.text=element_text(size=12))+
+  geom_smooth()
+```
+### PERMANOVA figure sex and cohort per month combined
+```{r combined}
+adonis_summary<-left_join(adonis_results,adonis_results_cohort,by="group")
+
+adonis_summary<-adonis_summary %>%
+  rename(p_value.x = p.value.x, p_value.y = p.value.y)
+adonis_summary_long<- adonis_summary %>%
+  pivot_longer(
+    cols = c(term.x, R2.x, p_value.x, term.y, R2.y, p_value.y),
+    names_to = c(".value", "set"),      # .value keeps R2/p.value as separatecolumns
+    names_sep = "\\."                   # split on "."
+  ) %>%
+  select(group, term, R2, p_value)
+
+```
+
+```{r combined plot, echo=FALSE}
+ggplot(adonis_summary_long, aes(x=group, y=R2, color=term)) +
+  geom_point(alpha=0.7, size=3)+
+  #geom_segment( aes(xend=group,yend=0)) +
+  #scale_color_gradient(low="black", high="#218d96")+
+  theme(axis.text=element_text(size=12))+
+  geom_smooth()
+```
+
+
+### Subset to females
+
+```{r female}
+qiime_female <- subset_samples(qiime_f, sex == "F")
+qiime_female<-prune_taxa(taxa_sums(qiime_female) > 0, qiime_female)
+
+#normalize
+qiime_female_norm<-transform_sample_counts(qiime_female,function(x) x / sum(x))
+#make samplesdf
+samples_female_df<-as.matrix(sample_data(qiime_female_norm))
+samples_female_df<-as.data.frame(samples_female_df)
+#BD distance
+bray_dist_matrix_fem<-phyloseq::distance(qiime_female_norm, method ="bray")
+
+```
+
+```{r adonis female}
+adonis2(bray_dist_matrix_fem ~ mousegroup.x + month, data = samples_female_df, permutations = 999, strata = samples_female_df$mouse, by="term")
+
+```
+
+### Subset to males
+
+```{r male}
+qiime_male <- subset_samples(qiime_f, sex == "M")
+qiime_male<-prune_taxa(taxa_sums(qiime_male) > 0, qiime_male)
+
+#normalize
+qiime_male_norm<-transform_sample_counts(qiime_male,function(x) x / sum(x))
+#make samplesdf
+samples_male_df<-as.matrix(sample_data(qiime_male_norm))
+samples_male_df<-as.data.frame(samples_male_df)
+#BD distance
+bray_dist_matrix_male<-phyloseq::distance(qiime_male_norm, method ="bray")
+
+```
+
+```{r adonis male}
+adonis2(bray_dist_matrix_male ~ mousegroup.x + month, data = samples_male_df, permutations = 999, strata = samples_male_df$mouse, by="term")
+
+```
+
+The effect of month on females was more than males. This could mean the microbiota in females was more dynamic.
+
+## PERMDISP on Bray-Curtis distance
+
+```{r bd by sex}
+anova(vegan::betadisper(bray_dist_matrix, samples_df$sex))
+```
+
+```{r bd by month}
+anova(vegan::betadisper(bray_dist_matrix, samples_df$month))
+```
+
+```{r bd female-month}
+anova(vegan::betadisper(bray_dist_matrix_fem, samples_female_df$month))
+```
+
+```{r bd male-month}
+anova(vegan::betadisper(bray_dist_matrix_male, samples_male_df$month))
+```
+```{r}
+anova(vegan::betadisper(bray_dist_matrix, samples_df$mouse))
+```
+
+```{r plot betadisper}
+disp_female <- betadisper(bray_dist_matrix_fem, sample_data(qiime_female)$month)
+disp_male   <- betadisper(bray_dist_matrix_male, sample_data(qiime_male)$month)
+
+boxplot(disp_female$distances ~ sample_data(qiime_female)$month, main="Females")
+boxplot(disp_male$distances ~ sample_data(qiime_male)$month, main="Males")
+
+```
+
+## Which sex changes more with age?
+Within-month variability in community composition isn’t equal in both males and females. Some months have tighter clustering (more homogeneous microbiota), while others are more variable.
+
+From both the PERMANOVA and betadisper we can see that:
+
+1.  Females show stronger overall temporal trends (higher R² for month). Also shows significant stochasticity but not to the same extent as the males.
+2.  Males show more uneven variability across months (stronger betadispersion), meaning their community variability fluctuates more
+
+## CCA Analysis
+```{r cca and plot}
+cap_ord <- ordinate(
+  physeq = qiime_norm, 
+  method = "CAP",
+  distance = bray_dist_matrix,
+  formula = ~ mousegroup.x + sex + month
+)
+
+# CAP plot
+cap_plot <- plot_ordination(
+  physeq = qiime_norm, 
+  ordination = cap_ord, 
+  color = "sex", 
+  axes = c(1,2)
+) + 
+  aes(shape = mousegroup.x) + 
+  geom_point(aes(colour = sex), alpha = 0.4, size = 4) + 
+  geom_point(colour = "grey90", size = 1.5) + 
+  scale_color_manual(values = c( "deeppink",  "#3639ff", 
+                                 "darkorchid3", "magenta")
+  )
+
+# Now add the environmental variables as arrows
+arrowmat <- vegan::scores(cap_ord, display = "bp")
+
+# Add labels, make a data.frame
+arrowdf <- data.frame(labels = rownames(arrowmat), arrowmat)
+
+# Define the arrow aesthetic mapping
+arrow_map <- aes(xend = CAP1, 
+                 yend = CAP2, 
+                 x = 0, 
+                 y = 0, 
+                 shape = NULL, 
+                 color = NULL, 
+                 label = labels)
+
+label_map <- aes(x = 1.3 * CAP1, 
+                 y = 1.3 * CAP2, 
+                 shape = NULL, 
+                 color = NULL, 
+                 label = labels)
+
+arrowhead = arrow(length = unit(0.02, "npc"))
+
+# Make a new graphic
+cap_plot + 
+  geom_segment(
+    mapping = arrow_map, 
+    size = .5, 
+    data = arrowdf, 
+    color = "gray", 
+    arrow = arrowhead
+  ) + 
+  geom_text(
+    mapping = label_map, 
+    size = 4,  
+    data = arrowdf, 
+    show.legend = FALSE
+  )
+```
+```{r anova cap}
+cap <- capscale(bray_dist_matrix ~ mousegroup.x+ month+sex, data = samples_df)
+anova(cap, by = "term")
+```
+
+```{r}
+# Extract table from capscale summary
+anova_terms <- anova(cap, by = "terms")
+summary_cap <- summary(cap)
+total_ss <- summary_cap$tot.chi       # total variance
+constrained_ss <- summary_cap$constr.chi
+unconstrained_ss <- summary_cap$unconst.chi
+
+# Compute partial R2 manually
+term_ss <- anova_terms$"SumOfSqs"
+term_R2 <- term_ss / total_ss
+
+R2_df <- data.frame(
+  term = rownames(anova_terms),
+  R2 = round(term_R2, 4),
+  F = round(anova_terms$F, 3),
+  p.value = anova_terms$"Pr(>F)"
+)
+
+R2_df
+```
+### Interpreting adonis and cap
+Sex and month explains roughly the same proportion of beta-diversity variation regardless of whether we use a distance-based regression (dbRDA) or a permutation-based ANOVA (PERMANOVA). 
+
+## Effect of weight loss and frailty on the microbiota
+
+I took the last time point collected per mice to determine if there was an effect by frailty. Using both adonis and mantel test, I see no association or correlation with bray curtis distance and frailty
+
+I did not consider max weight loss since we have the data for only 6 mice. 
+
+```{r frail}
+load("qiime_frail.RData") #See alpha_diversity.Rmd
+
+qiime_frail_norm<-transform_sample_counts(qiime_frail,function(x) x / sum(x))
+samples_df_frail<-sample_data(qiime_frail_norm)
+samples_df_frail<- as.matrix(samples_df_frail)
+samples_df_frail<- as.data.frame(samples_df_frail)
+```
+```{r adonis frail}
+dist_matrix_frail<-phyloseq::distance(qiime_frail_norm, method ="bray")
+adonis2(dist_matrix_frail~ mousegroup.x + frailty_physical, data = samples_df_frail, permutations = 999, by="terms")
+```
+```{r matel corr}
+frail_value <- dist(samples_df_frail$howlette_frailty)
+
+mantel_result <- mantel(dist_matrix_frail, frail_value, method = "spearman", permutations = 9999)
+
+mantel_result
+```
+

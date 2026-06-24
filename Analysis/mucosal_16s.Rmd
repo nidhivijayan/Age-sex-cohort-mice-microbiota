@@ -1,0 +1,527 @@
+---
+title: "mucosal"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-11-04"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r message=FALSE, warning=FALSE}
+library(qiime2R)
+library(phyloseq)
+library(ggplot2)
+library(RColorBrewer)
+theme_set(theme_bw())
+```
+
+# Load data
+```{r}
+lumu_qiime<-qza_to_phyloseq(features="Aging-mucosal-table-all-dada2.qza",
+                       tree="muscoal-rooted-tree-all.qza",
+                       metadata="AMCohortC_lumu_meta_v2.txt", 
+                       taxonomy = "Aging-mucosal-taxonomy-silva138-weighted-all.qza")
+
+```
+```{r}
+min(sample_sums(lumu_f))
+lumu_f <- prune_samples(sample_sums(lumu_qiime) >= 1000, lumu_qiime)
+lumu_norm<-transform_sample_counts(lumu_f, function(x) x/sum(x))
+
+```
+
+## Alpha diversity sex differences
+```{r}
+metadata_lumu_df<-as.data.frame(sample_data(lumu_f))
+metadata_lumu_df$SampleID<-rownames(metadata_lumu_df)
+metadata_lumu_df<-as.matrix(metadata_lumu_df)
+
+lumu_rare<-rarefy_even_depth(lumu_f,sample.size = min(sample_sums(lumu_f)))
+
+alpha.lumu.df <- estimate_richness(
+  lumu_rare, 
+  measures=c("Shannon", "Observed")) %>% 
+  rownames_to_column("SampleID") %>% 
+  merge(metadata_lumu_df, by="SampleID")
+
+#a_my_comparisons_lumu <-list(c("Content","Mucosa"))
+a_my_comparisons_lumu <-list(c("cecum","colon"),c("colon","ileum"),c("ileum","cecum"))
+symnum.args <- list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns"))
+
+alpha.lumu.df %>%
+  ggplot(aes(
+    x = position, y = Observed,
+    color = region
+  )) +
+geom_boxplot()+
+  facet_wrap(~ region+age+sex, scales = "free", nrow = 3) +
+  #scale_color_manual(values = c("deeppink", "blue")) +
+  scale_color_manual(values = c("#735D42","#4E9B94")) +
+  labs(
+    x = "Sex",
+    y = "",
+    title = "Alpha diversity ASV method (Y axis not at 0)"
+  ) +
+  theme_bw()+stat_compare_means(
+    comparisons = a_my_comparisons_lumu,
+    symnum.args = symnum.args,
+    method = "wilcox.test"
+  )
+```
+```{r}
+lumu_dist <- phyloseq::distance(lumu_norm, method ="bray")
+ordination_lumu = ordinate(lumu_norm, method="PCoA", distance=lumu_dist)
+
+
+pca_lumu <- plot_ordination(lumu_norm, ordination_lumu, color = "position", shape = "region") +
+  geom_point(aes(fill = position, color = position, shape = region, alpha=age),
+           size=5)+
+  #scale_fill_manual(values = c("deeppink", "blue")) +
+  #scale_color_manual(values = c("deeppink", "blue")) +
+  theme(
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    legend.key.size = unit(1, "line"),
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13)
+  )+ scale_fill_manual(values=c("#845ec2","#4d9078","#ffc75f","grey","#4a90e2","#00c2c7","#7a9e3e","#4d9078"))+
+  scale_color_manual(values=c("#845ec2","#4d9078","#ffc75f","grey"))+stat_ellipse(aes(group = interaction(position)),)
+pca_lumu
+```
+
+```{r}
+samples_df_lumu<-as.matrix(sample_data(lumu_norm))
+samples_df_lumu<-as.data.frame(samples_df_lumu)
+pairwise.adonis(lumu_dist, samples_df_lumu$position)
+```
+
+
+
+## Subset only ileum
+```{r}
+# Subset only ileum ==== 
+#What are the changes with age
+physeq_il <- subset_samples(lumu_f, position == c("ileum"))
+physeq_il
+
+sample_reads <- sample_sums(physeq_il)
+sorted_reads <- sort(sample_reads)
+print(sorted_reads)
+physeq_il <- prune_taxa(taxa_sums(physeq_il) > 0, physeq_il)
+
+physeq_il_norm<- transform_sample_counts(physeq_il,function(x) x / sum(x))
+ps_dist_il <- phyloseq::distance(physeq_il_norm, method ="bray")
+sampledf_il <- data.frame(sample_data(physeq_il_norm))
+adonis2(ps_dist_il ~ region+sex+age, data = sampledf_il, by="margin")
+
+```
+```{r}
+ileum_dist <- phyloseq::distance(physeq_il_norm, method ="bray")
+ordination_il = ordinate(physeq_il_norm, method="PCoA", distance=ileum_dist)
+
+
+pca_il <- plot_ordination(physeq_il_norm, ordination_il, color = "region", shape = "sex") +
+  geom_point(aes(fill = region, shape=sex), color = "black", size = 5) +
+  scale_shape_manual(values = c(21, 22, 23)) +
+  stat_ellipse(aes(group = interaction(region)), 
+  ) +
+  #scale_fill_manual(values = c("deeppink", "blue")) +
+  #scale_color_manual(values = c("deeppink", "blue")) +
+  theme(
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    legend.key.size = unit(1, "line"),
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13)
+  )+
+  scale_fill_manual(values=c("#735D42","#4E9B94"))+
+  scale_color_manual(values=c("#735D42","#4E9B94"))
+pca_il
+```
+```{r}
+pca_il_age <- plot_ordination(physeq_il_norm, ordination_il, color = "age", shape = "region") +
+  geom_point(aes(fill = age, shape=region), color = "black", size = 5) +
+  scale_shape_manual(values = c(21, 22, 23)) +
+  stat_ellipse(aes(group = interaction(age)), 
+  ) +
+  #scale_fill_manual(values = c("deeppink", "blue")) +
+  #scale_color_manual(values = c("deeppink", "blue")) +
+  theme(
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    legend.key.size = unit(1, "line"),
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13)
+  )+
+   scale_fill_manual(values=c("#E69F00", "#D55E00", "#CC79A7"))+
+  scale_color_manual(values=c("#E69F00", "#D55E00", "#CC79A7"))
+pca_il_age
+```
+
+## Subset only cecum
+```{r}
+# Subset only cecum ==== 
+#What are the changes with age
+physeq_cec <- subset_samples(lumu_f, position == c("cecum"))
+physeq_cec
+
+physeq_cec <- prune_taxa(taxa_sums(physeq_cec) > 0, physeq_cec)
+
+physeq_cec_norm<- transform_sample_counts(physeq_cec,function(x) x / sum(x))
+ps_dist_cec <- phyloseq::distance(physeq_cec_norm, method ="bray")
+sampledf_cec <- data.frame(sample_data(physeq_cec_norm))
+adonis2(ps_dist_cec ~ region+sex+age, data = sampledf_cec, by="margin")
+
+anova(vegan::betadisper(ps_dist_cec, sampledf_cec$age))
+
+```
+
+```{r}
+
+ordination_cec = ordinate(physeq_cec_norm, method="PCoA", distance=ps_dist_cec)
+
+pca_cec <- plot_ordination(physeq_cec_norm, ordination_cec, color = "region", shape = "sex") +
+  geom_point(aes(fill = region, shape=sex), color = "black", size = 5) +
+  scale_shape_manual(values = c(21, 22, 23)) +
+  stat_ellipse(aes(group = interaction(region)), 
+  ) +
+  #scale_fill_manual(values = c("deeppink", "blue")) +
+  #scale_color_manual(values = c("deeppink", "blue")) +
+  theme(
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    legend.key.size = unit(1, "line"),
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13)
+  )+
+  scale_fill_manual(values=c("#735D42","#4E9B94"))+
+  scale_color_manual(values=c("#735D42","#4E9B94"))
+pca_cec
+```
+
+```{r}
+pca_cec_age <- plot_ordination(physeq_cec_norm, ordination_cec, color = "age", shape = "region") +
+  geom_point(aes(fill = age, shape=region), color = "black", size = 5) +
+  scale_shape_manual(values = c(21, 22, 23)) +
+  stat_ellipse(aes(group = interaction(age)), 
+  ) +
+  #scale_fill_manual(values = c("deeppink", "blue")) +
+  #scale_color_manual(values = c("deeppink", "blue")) +
+  theme(
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    legend.key.size = unit(1, "line"),
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13)
+  )+
+  scale_fill_manual(values=c("#E69F00", "#D55E00", "#CC79A7"))+
+  scale_color_manual(values=c("#E69F00", "#D55E00", "#CC79A7"))
+
+pca_cec_age
+```
+
+## Subset only colon
+```{r}
+physeq_col <- subset_samples(lumu_f, position == c("colon"))
+physeq_col
+
+physeq_col <- prune_taxa(taxa_sums(physeq_col) > 0, physeq_col)
+
+physeq_col_norm<- transform_sample_counts(physeq_col,function(x) x / sum(x))
+ps_dist_col <- phyloseq::distance(physeq_col_norm, method ="bray")
+sampledf_col <- data.frame(sample_data(physeq_col_norm))
+adonis2(ps_dist_col ~ region+sex+age, data = sampledf_col, by="margin")
+```
+```{r}
+ordination_col = ordinate(physeq_col_norm, method="PCoA", distance=ps_dist_col)
+
+
+pca_col <- plot_ordination(physeq_col_norm, ordination_col, color = "region", shape = "sex") +
+  geom_point(aes(fill = region, shape=sex), color = "black", size = 5) +
+  scale_shape_manual(values = c(21, 22, 23)) +
+  stat_ellipse(aes(group = interaction(region)), 
+  ) +
+  #scale_fill_manual(values = c("deeppink", "blue")) +
+  #scale_color_manual(values = c("deeppink", "blue")) +
+  theme(
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    legend.key.size = unit(1, "line"),
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13)
+  )+
+  scale_fill_manual(values=c("#735D42","#4E9B94"))+
+  scale_color_manual(values=c("#735D42","#4E9B94"))
+pca_col
+```
+```{r}
+pca_col_sex <- plot_ordination(physeq_col_norm, ordination_col, color = "sex", shape = "region") +
+  geom_point(aes(fill = sex, shape=region), color = "black", size = 5) +
+  scale_shape_manual(values = c(21, 22, 23)) +
+  stat_ellipse(aes(group = interaction(sex)), 
+  ) +
+  scale_fill_manual(values = c("deeppink", "blue")) +
+  scale_color_manual(values = c("deeppink", "blue")) +
+  theme(
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    legend.key.size = unit(1, "line"),
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13)
+  )
+  #scale_fill_manual(values=c("#735D42","#4E9B94"))+
+  #scale_color_manual(values=c("#735D42","#4E9B94"))
+pca_col_sex
+```
+```{r}
+pca_col_age <- plot_ordination(physeq_col_norm, ordination_col, color = "age", shape = "region") +
+  geom_point(aes(fill = age, shape=region), color = "black", size = 5) +
+  scale_shape_manual(values = c(21, 22, 23)) +
+  #stat_ellipse(aes(group = interaction(age+region)),) +
+  stat_ellipse(aes(linetype = region), size = 1)+
+  scale_fill_manual(values=c("#E69F00", "#D55E00", "#CC79A7"))+
+  scale_color_manual(values=c("#E69F00", "#D55E00", "#CC79A7"))+
+  theme(
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    legend.key.size = unit(1, "line"),
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13)
+  )
+pca_col_age
+```
+
+# Subset only mucosal ==== 
+```{r}
+# Subset only mucosal ==== 
+#What are the changes with age
+physeq_mucosa <- subset_samples(lumu_f, region == c("Mucosa"))
+
+physeq_f_mucosa <- prune_taxa(taxa_sums(physeq_mucosa) > 0, physeq_mucosa)
+
+physeq_f_mucosa_norm<- transform_sample_counts(physeq_f_mucosa,function(x) x / sum(x))
+ps_dist_mucosa <- phyloseq::distance(physeq_f_mucosa_norm, method ="bray")
+sampledf_muc <- data.frame(sample_data(physeq_f_mucosa_norm))
+adonis2(ps_dist_mucosa ~ position+sex+age, data = sampledf_muc, strata = sampledf_muc$mouse, by="margin")
+```
+```{r}
+pairwise.adonis(ps_dist_mucosa, sampledf_muc$position)
+```
+
+## Mucosal ileum
+```{r}
+# Subset only mucosal ileum ==== 
+#What are the changes with age
+physeq_mucosa_il <- subset_samples(physeq_mucosa, position == c("ileum"))
+physeq_mucosa_il
+physeq_f_mucosa_il <- prune_taxa(taxa_sums(physeq_mucosa_il) > 0, physeq_mucosa_il)
+physeq_f_mucosa_norm_il<- transform_sample_counts(physeq_f_mucosa_il,function(x) x / sum(x))
+ps_dist_mucosa_il <- phyloseq::distance(physeq_f_mucosa_norm_il, method ="bray")
+sampledf_muc_il <- data.frame(sample_data(physeq_f_mucosa_norm_il))
+adonis2(ps_dist_mucosa_il ~ sex+age, data = sampledf_muc_il, by="margin")
+
+```
+```{r}
+pairwiseAdonis::pairwise.adonis(ps_dist_mucosa_il, sampledf_muc_il$age)
+```
+
+```{r}
+ordination_muc_il = ordinate(physeq_f_mucosa_norm_il, method="PCoA", distance=ps_dist_mucosa_il)
+
+pca_lumu_muc_il <- plot_ordination(physeq_f_mucosa_norm_il, ordination_muc_il, color = "sex", shape="age") +
+  geom_point(aes(fill =sex, shape=age), size = 5) + 
+  stat_ellipse(aes(group = interaction(sex))) + 
+  scale_fill_manual(values = c("deeppink", "blue")) +
+  scale_color_manual(values = c("deeppink", "blue")) +
+  theme_bw() + 
+  #facet_grid(~sex, scales ="free_x")+
+  theme(
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    legend.key.size = unit(1, "line"),
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13)
+  )
+pca_lumu_muc_il
+```
+```{r}
+ps_il_m <- getProportions(physeq_f_content_col)
+dist.mat.ilm <- phyloseq::distance(ps_il_m, "bray")
+muniq_il_m <- uniqueness(ps_il_m,
+                    dist_mat=dist.mat.ilm,
+                    reference_samples = NULL)
+
+ggplot(muniq_il_m,aes(month,uniqueness)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method = "lm") +
+  theme_bw()
+
+fit_muniq_il_m <- lmer(
+  uniqueness ~ month + (1 | cohort),
+  data = muniq_il_m
+)
+summary(fit_muniq_il_m)
+anova(fit_muniq_il_m)
+```
+```{r betadisper}
+anova(vegan::betadisper(ps_dist_content_cec , sampledf_cec_cont$month))
+```
+
+## Mucosal colon
+```{r}
+# Mucosal colon ====
+physeq_mucosa_co <- subset_samples(physeq_mucosa, position == c("colon"))
+physeq_mucosa_co
+physeq_f_mucosa_co <- prune_taxa(taxa_sums(physeq_mucosa_co) > 0, physeq_mucosa_co)
+sample_reads <- sample_sums(physeq_f_mucosa_co)
+sorted_reads <- sort(sample_reads)
+ #min 1108
+
+physeq_f_mucosa_norm_co<- transform_sample_counts(physeq_f_mucosa_co,function(x) x / sum(x))
+ps_dist_mucosa_co <- phyloseq::distance(physeq_f_mucosa_norm_co, method ="bray")
+sampledf_muc_co <- data.frame(sample_data(physeq_f_mucosa_norm_co))
+adonis2(ps_dist_mucosa_co ~ sex+age, data = sampledf_muc_co, by="margin")
+```
+```{r}
+pairwiseAdonis::pairwise.adonis(ps_dist_mucosa_co, sampledf_muc_co$age)
+```
+```{r}
+ordination_muc_co = ordinate(physeq_f_mucosa_norm_co, method="PCoA", distance=ps_dist_mucosa_co)
+
+#TO get color palettes
+# https://medialab.github.io/iwanthue/
+
+
+pca_lumu_muc_co <- plot_ordination(physeq_f_mucosa_norm_co, ordination_muc_co, color = "sex", shape = "age") +
+  geom_point(aes(fill = sex, shape=age), color = "black", size = 5) +
+  scale_shape_manual(values = c(21, 22, 23)) + 
+  scale_fill_manual(values = c("deeppink", "blue")) +
+  scale_color_manual(values = c("deeppink", "blue")) +
+  theme_bw() + 
+  #facet_grid(~sex, scales ="free_x")+
+  theme(
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    legend.key.size = unit(1, "line"),
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13)
+  )+stat_ellipse(aes(group = interaction(sex))) 
+
+pca_lumu_muc_co
+```
+## Mucosal cecum
+```{r}
+physeq_mucosa_cec <- subset_samples(physeq_mucosa, position == c("cecum"))
+physeq_mucosa_cec
+physeq_f_mucosa_cec <- prune_taxa(taxa_sums(physeq_mucosa_cec) > 0, physeq_mucosa_cec)
+sample_reads <- sample_sums(physeq_f_mucosa_cec)
+sorted_reads <- sort(sample_reads)
+ #min 1385
+physeq_f_mucosa_norm_cec<- transform_sample_counts(physeq_f_mucosa_cec,function(x) x / sum(x))
+ps_dist_mucosa_cec <- phyloseq::distance(physeq_f_mucosa_norm_cec, method ="bray")
+sampledf_muc_cec <- data.frame(sample_data(physeq_f_mucosa_norm_cec))
+adonis2(ps_dist_mucosa_cec ~ sex+age, data = sampledf_muc_cec, by="margin")
+```
+```{r}
+pairwiseAdonis::pairwise.adonis(ps_dist_mucosa_cec, sampledf_muc_cec$age)
+```
+
+```{r}
+ordination_muc_cec = ordinate(physeq_f_mucosa_norm_cec, method="PCoA", distance=ps_dist_mucosa_cec)
+
+pca_lumu_muc_cec <- plot_ordination(physeq_f_mucosa_norm_cec, ordination_muc_cec, color = "sex", shape = "age") +
+  geom_point(aes(fill = sex, shape=age), color = "black", size = 5) +
+  scale_shape_manual(values = c(21, 22, 23)) + 
+  scale_fill_manual(values = c("deeppink", "blue")) +
+  scale_color_manual(values = c("deeppink", "blue")) +
+  theme_bw() + 
+  theme(
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    legend.key.size = unit(1, "line"),
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13)
+  )+stat_ellipse(aes(group = interaction(sex))) 
+pca_lumu_muc_cec
+```
+#Subset only luminal content
+
+```{r}
+physeq_content <- subset_samples(lumu_f, region == c("Content"))
+physeq_content
+
+sample_reads <- sample_sums(physeq_content)
+sorted_reads <- sort(sample_reads)
+physeq_f_content <- prune_taxa(taxa_sums(physeq_content) > 0, physeq_content)
+
+physeq_f_content_norm<- transform_sample_counts(physeq_f_content,function(x) x / sum(x))
+ps_dist_content <- phyloseq::distance(physeq_f_content_norm, method ="bray")
+sampledf_cont <- data.frame(sample_data(physeq_f_content_norm))
+adonis2(ps_dist_content ~ position+sex+age, data = sampledf_cont, by="margin")
+
+```
+```{r}
+pairwise.adonis(ps_dist_content, sampledf_cont$position)
+```
+
+## Colon lumen
+```{r}
+physeq_content_col <- subset_samples(physeq_content, position == c("colon"))
+ #89 samples
+
+sample_reads <- sample_sums(physeq_content_col)
+sorted_reads <- sort(sample_reads)
+ #18648 min
+physeq_f_content_col <- prune_taxa(taxa_sums(physeq_content_col) > 0, physeq_content_col)
+
+physeq_f_content_col_norm<- transform_sample_counts(physeq_f_content_col,function(x) x / sum(x))
+ps_dist_content_col <- phyloseq::distance(physeq_f_content_col_norm, method ="bray")
+sampledf_col_cont <- data.frame(sample_data(physeq_f_content_col_norm))
+adonis2(ps_dist_content_col ~ sex+age, data = sampledf_col_cont, by="margin")
+
+```
+```{r}
+pairwiseAdonis::pairwise.adonis(ps_dist_content_col, sampledf_col_cont$age)
+```
+## Cecal lumen
+```{r}
+physeq_content_cec <- subset_samples(physeq_content, position == c("cecum"))
+
+physeq_f_content_cec <- prune_taxa(taxa_sums(physeq_content_cec) > 0, physeq_content_cec)
+
+physeq_f_content_cec_norm<- transform_sample_counts(physeq_f_content_cec,function(x) x / sum(x))
+ps_dist_content_cec <- phyloseq::distance(physeq_f_content_cec_norm, method ="bray")
+sampledf_cec_cont <- data.frame(sample_data(physeq_f_content_cec_norm))
+adonis2(ps_dist_content_cec ~ sex+age, data = sampledf_cec_cont, by="margin")
+
+```
+```{r}
+pairwiseAdonis::pairwise.adonis(ps_dist_content_cec, sampledf_cec_cont$age)
+```
+
+## Ileum lumen
+```{r}
+physeq_content_il <- subset_samples(physeq_content, position == c("ileum"))
+ #89 samples
+
+physeq_f_content_il <- prune_taxa(taxa_sums(physeq_content_il) > 0, physeq_content_il)
+
+physeq_f_content_il_norm<- transform_sample_counts(physeq_f_content_il,function(x) x / sum(x))
+ps_dist_content_il <- phyloseq::distance(physeq_f_content_il_norm, method ="bray")
+sampledf_il_cont <- data.frame(sample_data(physeq_f_content_il_norm))
+adonis2(ps_dist_content_il ~ sex+age, data = sampledf_il_cont, by="margin")
+
+```

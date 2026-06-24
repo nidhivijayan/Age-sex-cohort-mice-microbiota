@@ -1,0 +1,698 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r message=FALSE, warning=FALSE}
+library(qiime2R)
+library(phyloseq)
+library(ggplot2)
+library(RColorBrewer)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(vegan)
+theme_set(theme_bw())
+```
+
+
+
+```{r}
+fmt_qiime<-qza_to_phyloseq(features="FMT-table-combined_v3.qza",
+                       tree="rooted-tree-merged-combined.qza",
+                       metadata="MT_MAmice_metadata_v3.txt", 
+                       taxonomy = "FMT-taxonomy-silva138-weighted-combined.qza")
+fmt_qiime
+fmt_qiime<-prune_taxa(taxa_sums(fmt_qiime) > 0, fmt_qiime)
+print(order(sample_sums(fmt_qiime)))
+```
+#Samples summary
+```{r}
+samples_fmt_df<-as.data.frame(sample_data(fmt_qiime))
+metadata_summ_fmt <- samples_fmt_df %>%
+  group_by(age_type, host_sex, generation, MT) %>%
+  summarise(n_samples = n(), .groups = "drop")
+View(metadata_summ_fmt)
+
+ggplot(metadata_summ_fmt, aes(fill=host_sex, y=n_samples, x=age_type)) + scale_fill_manual(values=c("deeppink","blue","grey"))+
+  geom_bar(position="stack", stat="identity")+facet_wrap(.~MT+generation, scales="free", nrow=4)+theme(axis.text.x = element_text(angle=90))
+```
+
+
+# FMT from aged mice to GF
+```{r}
+metadata_fmt<-as.data.frame(sample_data(fmt_qiime))
+metadata_fmt$SampleID<-rownames(metadata_fmt)
+metadata_fmt<-as.matrix(metadata_fmt)
+
+fmt_qiime_rare<-rarefy_even_depth(fmt_qiime,sample.size = min(sample_sums(fmt_qiime))) #Min was 7283
+
+alpha.div.fmt.df <- estimate_richness(
+  fmt_qiime_rare, 
+  measures=c("Shannon", "Observed","Chao1","Simpson")) %>% 
+  rownames_to_column("SampleID") %>% 
+  merge(metadata_fmt, by="SampleID")
+
+alpha.div.long.fmt.df <- alpha.div.fmt.df %>% 
+  pivot_longer(c(Shannon, Observed), names_to="metric")
+
+# summarize across sexes
+
+alpha.div.plot.fmt.df <- alpha.div.long.fmt.df %>% 
+  dplyr::filter(metric %in% c("Shannon")) %>% 
+  
+  # compute mean and SD across diets (separately for each metric)
+  group_by(metric, generation, MT, age_type)
+
+alpha.div.plot.fmt.df %>%
+  ggplot(aes(
+    x = age_type, y = value,
+    color = generation
+  )) +
+  geom_boxplot(stat="boxplot") +
+  facet_wrap(~ metric+host_sex, scales = "free", nrow = 2) +
+  #scale_color_manual(values = c("deeppink", "blue")) +
+  labs(
+    x = "Age (months)",
+    y = "",
+    title = "Alpha diversity ASV method (Y axis not at 0)"
+  ) +
+  theme_bw()
+```
+```{r}
+#alpha.div.plot.fmt.df<-read.delim("alpha-fmt-df.txt")
+alpha.div.plot.fmt.df %>%
+   ggplot(aes(
+     x = age_type, y = value,
+     color = MT
+   )) +
+   geom_boxplot(width = 0.6,position = position_dodge2(width = 0.7, preserve = "single")) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2), alpha = 0.4, size = 1.5) +
+facet_wrap(~metric+generation, scales = "free", nrow=2)+
+   scale_color_manual(values = c("#f8766d", "#4477aa", "#aa3377", "#619cff","grey")) +
+   labs(
+     x = "Age (months)",
+     y = "",
+     title = "Alpha diversity ASV method (Y axis not at 0)"
+   ) +
+   theme_bw()
+```
+## Beta Diversity
+```{r}
+subset_F1_F2<-subset_samples(fmt_qiime, generation  %in% c("F2","F1"))
+
+subset_F1_F2<-subset_samples(subset_F1_F2, age_type  %in% c("D_middle_aged","B_post_weaning", "A_weaning"))
+subset_F1_F2<-subset_samples(subset_F1_F2, MT %in% c("AFM1","AMM","YFM","YMM"))
+subset_F1_F2<-prune_taxa(taxa_sums(subset_F1_F2) > 0, subset_F1_F2)
+
+fmt_norm<-  fmt_qiime %>%
+  transform_sample_counts(function(x) x/sum(x))
+
+subset_F1_F2_norm<-subset_F1_F2 %>%
+  transform_sample_counts(function(x) x/sum(x))
+
+subset_F1_F2_bdist.ord.fmt <- ordinate(subset_F1_F2_norm, "PCoA", "bray")
+
+plot_ordination(subset_F1_F2_norm, subset_F1_F2_bdist.ord.fmt, color="MT", title="Bray Curtis", shape = "age_type_gen") +
+    geom_point(aes(fill=MT,color = MT, shape = age_type_gen), size = 4) +  # size outside aes()
+    scale_fill_manual(values = c("#f8766d", "#4477aa", "#aa3377", "#619cff","black")) +
+    scale_color_manual(values = c("#f8766d", "#4477aa", "#aa3377", "#619cff","black")) +
+    scale_shape_manual(values = c(1,21, 2, 24,13)) +  # Add shape scale (fillable shapes) 
+    theme(legend.text = element_text(size = 12), axis.text = element_text(size=14), axis.title = element_text(size=15)) +
+    guides(
+        fill = guide_legend(override.aes = list(shape = 21)),
+        color = guide_legend(override.aes = list(shape = 21)),
+        shape = guide_legend(),
+        alpha = guide_legend(),
+        size = "none"  # Remove size legend since it's constant
+    ) +stat_ellipse(aes(group = age_type), linewidth = 1) 
+```
+```{r}
+bdist.ord.fmt_df <- as.data.frame(bdist.ord.fmt$vectors[,1:3])
+bdist.ord.fmt_df$MT <- sample_data(subset_F1_F2)$MT
+bdist.ord.fmt_df$age_type_gen <- sample_data(subset_F1_F2)$age_type_gen
+bdist.ord.fmt_df$generation <- sample_data(fmt_qiime)$generation
+
+plot_ly(bdist.ord.fmt_df, 
+        x = ~Axis.1, y = ~Axis.2, z = ~Axis.3,
+        color = ~MT,
+        colors = c("#f8766d", "#4477aa", "#aa3377", "#619cff"),
+        symbol = ~age_type_gen,  # Use 'symbol' instead of 'shape'
+        symbols = c('circle', 'square', 'cross', 'triangle-up'),  # Define symbols
+        type = "scatter3d", 
+        mode = "markers",
+        marker = list(size = 4)) %>%
+    layout(title = "3D Bray-Curtis Ordination (PCoA)")
+```
+```{r adonis}
+
+samples_fmt_df_full<-as.matrix(sample_data(fmt_norm))
+samples_fmt_df_full<-as.data.frame(samples_fmt_df_full)
+
+bray_dist_matrix_fmt_full<-phyloseq::distance(fmt_norm, method ="bray")
+```
+
+```{r}
+adonis2(bray_dist_matrix_fmt_full ~ MT+generation+age_type+host_sex, data = samples_fmt_df_full, permutations = 999, by="margin")
+```
+```{r}
+adonis2(bray_dist_matrix_fmt_full ~ Donor_Age+Donor_sex+generation+month_age+host_sex, data = samples_fmt_df_full, permutations = 999, by="margin")
+```
+
+### Jaccard
+```{r}
+ordination_fmt_jac <- ordinate(fmt_norm, method = "PCoA", distance = "jaccard")
+```
+
+```{r}
+plot_ordination(fmt_norm, ordination_fmt_jac, color="MT", title="Jaccard distance")+geom_point(aes(fill=MT))+
+  scale_fill_manual(values=c("#f8766d", "#4477aa", "#aa3377", "#619cff"))+theme(legend.text = element_text(size=12))+
+ scale_color_manual(values=c("#f8766d", "#4477aa", "#aa3377", "#619cff"))+
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21)),
+    shape = guide_legend())+
+  stat_ellipse(aes(group=MT), linetype="dashed")
+```
+### Weighted UniFrac PCoA
+```{r}
+ordination_wu_fmt <- ordinate(fmt_norm, method = "PCoA", distance = "unifrac", weighted=TRUE)
+```
+
+
+```{r, echo=FALSE}
+# Plot: pass the phyloseq object, not the distance
+plot_ordination(fmt_norm, ordination_wu_fmt, color = "MT",
+                        title = "Weighted UniFrac (PCoA)", shape="generation")+geom_point(aes(fill=MT))+
+  scale_fill_manual(values=c("#f8766d", "#4477aa", "#aa3377", "#619cff"))+theme(legend.text = element_text(size=12))+
+ scale_color_manual(values=c("#f8766d", "#4477aa", "#aa3377", "#619cff"))+
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21)),
+    shape = guide_legend())+
+  stat_ellipse(aes(group=MT), linetype="dashed")
+```
+
+```{r}
+ordination_uwu_fmt <- ordinate(fmt_norm, method = "PCoA", distance = "unifrac", weighted=FALSE)
+```
+
+### UnWeighted UniFrac PCoA
+
+```{r, echo=FALSE}
+# Plot: pass the phyloseq object, not the distance
+plot_ordination(fmt_norm, ordination_uwu_fmt, color = "MT",
+                        title = "Unweighted UniFrac (PCoA)")+geom_point(aes(fill=MT))+
+  scale_fill_manual(values=c("#f8766d", "#4477aa", "#aa3377", "#619cff"))+theme(legend.text = element_text(size=12))+
+ scale_color_manual(values=c("#f8766d", "#4477aa", "#aa3377", "#619cff"))+
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21)),
+    shape = guide_legend())+
+  stat_ellipse(aes(group=MT), linetype="dashed")
+```
+
+
+## Stats PERMANOVA
+
+### subset to wean-ps mice
+```{r}
+subset_pst_W <- subset_samples(fmt_qiime, age_type %in% c("AA_weaning", "B_post_weaning"))
+subset_pst_W<-prune_taxa(taxa_sums(subset_pst_W) > 0, subset_pst_W)
+
+#normalize
+subset_pst_W_norm<-transform_sample_counts(subset_pst_W,function(x) x / sum(x))
+
+samples_fmt_df_W<-as.matrix(sample_data(subset_pst_W_norm))
+samples_fmt_df_W<-as.data.frame(samples_fmt_df_W)
+
+bdist.ord.fmt_W <- ordinate(subset_pst_W_norm, "PCoA", "bray")
+
+sample_data(subset_pst_W_norm)$week_age <-
+  as.numeric(as.character(sample_data(subset_pst_W_norm)$week_age))
+plot_ordination(subset_pst_W_norm, bdist.ord.fmt_W , color="MT", title="Bray Curtis", shape="age_type_gen") +
+    geom_point(aes(fill = MT, shape = age_type_gen), size = 4) +  # size outside aes()
+    scale_fill_manual(values = c("#f8766d", "#4477aa", "#aa3377", "#619cff")) +
+    scale_color_manual(values = c("#f8766d", "#4477aa", "#aa3377", "#619cff")) +
+    scale_shape_manual(values = c(21, 22, 24, 23, 25)) +  # Add shape scale (fillable shapes)
+    theme(legend.text = element_text(size = 12)) +
+    guides(
+        fill = guide_legend(override.aes = list(shape = 21)),
+        color = guide_legend(override.aes = list(shape = 21)),
+        shape = guide_legend(),
+        size = "none"  # Remove size legend since it's constant
+    ) 
+```
+### subset to weaning-post-weaning F2
+```{r}
+subset_pst_W_F2<-subset_samples(subset_pst_W, generation == "F2")
+subset_pst_W_F2<-prune_taxa(taxa_sums(subset_pst_W_F2) > 0, subset_pst_W_F2)
+```
+
+
+### subset to F2 mice
+```{r}
+
+subset_pst_F2<-subset_samples(fmt_qiime, generation == "F2")
+subset_pst_F2<-prune_taxa(taxa_sums(subset_pst_F2) > 0, subset_pst_F2)
+
+#normalize
+subset_pst_F2_norm<-transform_sample_counts(subset_pst_F2,function(x) x / sum(x))
+
+samples_fmt_df<-as.matrix(sample_data(subset_pst_F2_norm))
+samples_fmt_df<-as.data.frame(samples_fmt_df)
+
+bray_dist_matrix_fmt<-phyloseq::distance(subset_pst_F2, method ="bray")
+```
+
+```{r adonis1}
+adonis2(bray_dist_matrix_fmt ~ Donor_Age+Donor_sex+age_type+host_sex, data = samples_fmt_df, permutations = 999, by="margin")
+```
+```{r}
+bdist.ord.fmt_psW <- ordinate(subset_pst_F2_norm, "PCoA", "bray")
+
+plot_ordination(subset_pst_F2_norm, bdist.ord.fmt_psW , color="MT", title="Bray Curtis", shape="age_type") +
+    geom_point(aes(fill = MT, shape = age_type), size = 4) +  # size outside aes()
+    scale_fill_manual(values = c("#f8766d", "#4477aa", "#aa3377", "#619cff")) +
+    scale_color_manual(values = c("#f8766d", "#4477aa", "#aa3377", "#619cff")) +
+    scale_shape_manual(values = c(21, 22, 24, 23, 20)) +  # Add shape scale (fillable shapes)
+    theme(legend.text = element_text(size = 12)) +
+    guides(
+        fill = guide_legend(override.aes = list(shape = 21)),
+        color = guide_legend(override.aes = list(shape = 21)),
+        shape = guide_legend(),
+        size = "none"  # Remove size legend since it's constant
+    ) 
+```
+```{r}
+bdist.ord.fmt_psW_df <- as.data.frame(bdist.ord.fmt_psW$vectors[,1:3])
+bdist.ord.fmt_psW_df$MT <- sample_data(subset_pst_F2_norm)$MT
+
+plot_ly(bdist.ord.fmt_psW_df, 
+        x = ~Axis.1, y = ~Axis.2, z = ~Axis.3,
+        color = ~MT,
+        colors = c("#f8766d", "#4477aa", "#aa3377", "#619cff"),
+        #symbol = ~generation,  # Use 'symbol' instead of 'shape'
+        #symbols = c('circle', 'square', 'diamond', 'cross', 'triangle-up'),  # Define symbols
+        type = "scatter3d", 
+        mode = "markers",
+        marker = list(size = 4)) %>%
+    layout(title = "3D Bray-Curtis Ordination (PCoA)")
+```
+
+
+```{r}
+bd_fmt<-betadisper(bray_dist_matrix_fmt, samples_fmt_df$MT)
+anova(bd_fmt)
+```
+```{r}
+bd_fmt_2<-betadisper(bray_dist_matrix_fmt, samples_fmt_df$generation)
+anova(bd_fmt_2)
+```
+### Subset middle aged
+```{r}
+subset_pst_older<-subset_samples(fmt_qiime, age_type == c("D_middle_aged"))
+subset_pst_older<-prune_taxa(taxa_sums(subset_pst_older) > 0, subset_pst_older)
+
+subset_pst_older_f1<-subset_samples(subset_pst_older, generation == c("F1"))
+subset_pst_older_f1<-prune_taxa(taxa_sums(subset_pst_older_f1) > 0, subset_pst_older)
+
+subset_pst_W_F2<-subset_samples(subset_pst_W, generation == "F2")
+subset_pst_W_F2<-prune_taxa(taxa_sums(subset_pst_W_F2) > 0, subset_pst_W_F2)
+
+subset_donor<-subset_samples(fmt_qiime, generation == c("Donor"))
+subset_donor<-prune_taxa(taxa_sums(subset_donor) > 0, subset_donor)
+
+#normalize
+subset_pst_older_norm<-transform_sample_counts(subset_pst_older_f1,function(x) x / sum(x))
+
+samples_fmt_df<-as.matrix(sample_data(subset_pst_older_norm))
+samples_fmt_df_MA<-as.data.frame(samples_fmt_df)
+
+otu_data_afm1<-otu_table(subset_pst_older_norm)
+otu_data_afm1<-as.matrix(otu_data_afm1)
+otu_data_afm1<-as.data.frame(otu_data_afm1)
+
+otu_data_afm1_filt <- otu_data_afm1 %>%
+  dplyr::filter(rowSums(across(where(is.numeric)) > 0.01, na.rm = TRUE) >= 2)
+otu_data_afm1_filt$ASV<-rownames(otu_data_afm1_filt)
+
+tdf_fmt<-as.data.frame(tax_table(fmt_qiime))
+tdf_fmt$ASV<-rownames(tdf_fmt)
+otu_data_afm1_tax<-merge(otu_data_afm1_filt,tdf_fmt, by="ASV")
+
+otu_data_afm1_tax_filt2<- otu_data_afm1_tax %>%
+  dplyr::filter(Genus %in% c("Turicibacter","Bacteroides","Bifidobacterium","Faecalibaculum","Lactobacillus"))
+
+otu_data_afm1_tax_long <- otu_data_afm1_tax_filt2 %>%
+  pivot_longer(
+    cols = -c(ASV, Kingdom, Phylum, Class, Order, Family, Genus, Species),
+    names_to = "SampleID",
+    values_to = "Abundance"
+  )
+
+otu_data_afm1_tax_long<-merge(otu_data_afm1_tax_long,metadata_fmt, by="SampleID")
+
+otu_data_afm1_tax_long_v2<- otu_data_afm1_tax_long %>%
+  group_by(MT, Genus, host_sex) %>%
+  summarise(n_samples   = dplyr::n(),
+    median_abund = median(Abundance, na.rm = TRUE),
+    sd_abund     = sd(Abundance, na.rm = TRUE),
+    .groups = "drop") 
+
+  
+otu_data_afm1_tax_long %>%
+  ggplot(aes(x=Genus, y=Abundance, color=host_sex))+
+  geom_boxplot()+
+facet_wrap(~ MT+host_sex, scales = "free", nrow = 2) +
+  theme(axis.text.x = element_text(angle=90))+
+  scale_color_manual(values = c("deeppink","#3639ff"))+
+  geom_jitter()
+
+bray_dist_matrix_MA_fmt<-phyloseq::distance(subset_pst_older_norm, method ="bray")
+
+
+```
+
+```{r}
+adonis2(bray_dist_matrix_MA_fmt ~ Donor_Age+Donor_sex+host_sex+month_age, data = samples_fmt_df_MA, permutations = 999, by="margin")
+```
+```{r}
+pairwiseAdonis::pairwise.adonis(bray_dist_matrix_MA_fmt, samples_fmt_df$MT)
+```
+
+However this is sqewed too since most samples from F0 are from only AFM. So remove F0s. 
+
+```{r}
+bdist.ord.fmt_ps_MA_f1 <- ordinate(subset_pst_older_norm, "PCoA", "bray")
+
+plot_ordination(subset_pst_older_norm, bdist.ord.fmt_ps_MA_f1 , color="MT", title="Bray Curtis", shape="age_type") +
+    geom_point(aes(fill = MT, shape = age_type), size = 4) +  # size outside aes()
+    scale_fill_manual(values = c("#f8766d", "#4477aa", "#aa3377", "#619cff")) +
+    scale_color_manual(values = c("#f8766d", "#4477aa", "#aa3377", "#619cff")) +
+    scale_shape_manual(values = c(9)) +  # Add shape scale (fillable shapes)
+    theme(legend.text = element_text(size = 12)) +
+    guides(
+        fill = guide_legend(override.aes = list(shape = 21)),
+        color = guide_legend(override.aes = list(shape = 21)),
+        shape = guide_legend(),
+        size = "none"  # Remove size legend since it's constant
+    ) 
+```
+# Subset to each MT line
+## Find ASVs that are core and at rel abund > 1. Plot lines.
+##Subset to AFM1
+```{r}
+subset_AFM <- subset_samples(fmt_qiime, MT %in% c("AMM"))
+subset_AFM<-prune_taxa(taxa_sums(subset_AFM) > 0, subset_AFM)
+
+#normalize
+subset_AFM_norm<-transform_sample_counts(subset_AFM,function(x) x / sum(x))
+
+otu_data_afm1<-otu_table(subset_AFM_norm)
+otu_data_afm1<-as.matrix(otu_data_afm1)
+otu_data_afm1<-as.data.frame(otu_data_afm1)
+
+otu_data_afm1_filt <- otu_data_afm1 %>%
+  dplyr::filter(rowSums(across(where(is.numeric)) > 0.01, na.rm = TRUE) >= 2)
+otu_data_afm1_filt$ASV<-rownames(otu_data_afm1_filt)
+
+tdf_fmt<-as.data.frame(tax_table(fmt_qiime))
+tdf_fmt$ASV<-rownames(tdf_fmt)
+otu_data_afm1_tax<-merge(otu_data_afm1_filt,tdf_fmt, by="ASV")
+
+otu_data_afm1_tax_filt2<- otu_data_afm1_tax %>%
+  dplyr::filter(Genus %in% c("Turicibacter","Bacteroides","Bifidobacterium","Faecalibaculum","Lactobacillus"))
+
+otu_data_afm1_tax_long <- otu_data_afm1_tax_filt2 %>%
+  pivot_longer(
+    cols = -c(ASV, Kingdom, Phylum, Class, Order, Family, Genus, Species),
+    names_to = "SampleID",
+    values_to = "Abundance"
+  )
+
+otu_data_afm1_tax_long<-merge(otu_data_afm1_tax_long,metadata_fmt, by="SampleID")
+
+otu_data_afm1_tax_long_v2<- otu_data_afm1_tax_long %>%
+  group_by(age_type, generation, Genus, Family, sex) %>%
+  summarise(n_samples   = dplyr::n(),
+    median_abund = median(Abundance, na.rm = TRUE),
+    sd_abund     = sd(Abundance, na.rm = TRUE),
+    .groups = "drop") 
+
+otu_data_afm1_tax_long_v2$gen_age<- paste(otu_data_afm1_tax_long_v2$generation,otu_data_afm1_tax_long_v2$age_type, sep = "_")
+
+otu_data_afm1_tax_long_v2$gen_age <- factor(
+  otu_data_afm1_tax_long_v2$gen_age,
+  levels = c(
+    "Donor_A_Donor", "F0_B_post_weaning", "F0_C_young",
+    "F0_D_middle_aged", "F1_AA_weaning","F1_B_post_weaning", "F1_C_young", "F1_D_middle_aged","F2_AA_weaning","F2_B_post_weaning","F2_C_young"
+  ),
+  ordered = TRUE
+)
+  
+otu_data_afm1_tax_long_v2 %>%
+  ggplot(aes(x=gen_age, y=median_abund, color=sex,  ymin = median_abund - sd_abund, ymax = median_abund + sd_abund))+
+  geom_path(alpha = 0.7) +
+  geom_pointrange(alpha = 0.7) +
+facet_wrap(~ Genus, scales = "free", nrow = 2) +
+  theme(axis.text.x = element_text(angle=90))
+
+```
+```{r}
+otu_data_afm1_tax_filt2<- otu_data_afm1_tax %>%
+  dplyr::filter(Family %in% c("Turicibacter","Bacteroides","Butyricicoccus","Bifidobacterium","Faecalibaculum"))
+
+
+```
+
+#Plot rel_abund all MTs
+```{r}
+
+#normalize
+subset_norm<-transform_sample_counts(fmt_qiime,function(x) x / sum(x))
+
+otu_data1<-otu_table(subset_norm)
+otu_data1<-as.matrix(otu_data1)
+otu_data1<-as.data.frame(otu_data1)
+
+otu_data1_filt <- otu_data1 %>%
+  dplyr::filter(rowSums(across(where(is.numeric)) > 0.01, na.rm = TRUE) >= 3)
+otu_data1_filt$ASV<-rownames(otu_data1_filt)
+
+tdf_fmt<-as.data.frame(tax_table(fmt_qiime))
+tdf_fmt$ASV<-rownames(tdf_fmt)
+otu_data1_tax<-merge(otu_data1_filt,tdf_fmt, by="ASV")
+
+otu_data1_tax_long <- otu_data1_tax %>%
+  pivot_longer(
+    cols = -c(ASV, Kingdom, Phylum, Class, Order, Family, Genus, Species),
+    names_to = "SampleID",
+    values_to = "Abundance"
+  )
+
+otu_data1_tax_long<-merge(otu_data1_tax_long,metadata_fmt, by="SampleID")
+
+otu_data1_tax_long_v2<- otu_data1_tax_long %>%
+  group_by(age_type, generation, Genus, Family, MT, sex) %>%
+  summarise(n_samples   = dplyr::n(),
+            median_abund = median(Abundance, na.rm = TRUE),
+            sd_abund     = sd(Abundance, na.rm = TRUE),
+            .groups = "drop") 
+
+otu_data1_tax_long_v2$gen_age<- paste(otu_data1_tax_long_v2$generation,otu_data1_tax_long_v2$age_type, sep = "_")
+
+otu_data1_tax_long_v2$gen_age <- factor(
+  otu_data1_tax_long_v2$gen_age,
+  levels = c(
+    "Donor_A_Donor", "F0_B_post_weaning", "F0_C_young",
+    "F0_D_middle_aged","F1_AA_weaning","F1_B_post_weaning", "F1_C_young", "F1_D_middle_aged","F2_AA_weaning","F2_B_post_weaning","F2_C_young"
+  ),
+  ordered = TRUE
+)
+
+otu_data1_tax_long_v2 %>%
+  ggplot(aes(x=gen_age, y=median_abund, color=sex,  ymin = median_abund - sd_abund, ymax = median_abund + sd_abund))+
+  geom_path(alpha = 0.7) +
+  geom_pointrange(alpha = 0.7) +
+  facet_wrap(~ Genus+MT, scales = "free", nrow = 2) +
+  theme(axis.text.x = element_text(angle=90))
+```
+
+## Plot rel abund based on maaslin comparison
+
+```{r}
+maas_res_fmt<-read_excel("maaslin_results_fmt.xlsx")
+
+maas_res_fmt <- maas_res_fmt[!duplicated(maas_res_fmt$feature), ]
+maas_res_fmt<- maas_res_fmt[c(1)]
+
+maas_res_fmt<-merge(maas_res_fmt,otu_data1_filt, by.x="feature",by.y="ASV")
+
+
+maas_res_fmt_tax<-merge(maas_res_fmt,tdf_fmt, by.x="feature",by.y="ASV")
+
+otu_data1_tax_long <- maas_res_fmt_tax %>%
+  pivot_longer(
+    cols = -c(feature, Kingdom, Phylum, Class, Order, Family, Genus, Species),
+    names_to = "SampleID",
+    values_to = "Abundance"
+  )
+
+otu_data1_tax_long<-merge(otu_data1_tax_long,metadata_fmt, by="SampleID")
+
+otu_data1_tax_long_v2<- otu_data1_tax_long %>%
+  group_by(age_type, generation, Genus, Family, MT) %>%
+  summarise(n_samples   = dplyr::n(),
+            median_abund = median(Abundance, na.rm = TRUE),
+            sd_abund     = sd(Abundance, na.rm = TRUE),
+            .groups = "drop") 
+
+otu_data1_tax_long_v2$gen_age<- paste(otu_data1_tax_long_v2$generation,otu_data1_tax_long_v2$age_type, sep = "_")
+
+otu_data1_tax_long_v2$gen_age <- factor(
+  otu_data1_tax_long_v2$gen_age,
+  levels = c(
+    "Donor_A_Donor", "F0_B_post_weaning", "F0_C_young",
+    "F0_D_middle_aged","F1_AA_weaning","F1_B_post_weaning", "F1_C_young", "F1_D_middle_aged","F2_AA_weaning","F2_B_post_weaning","F2_C_young"
+  ),
+  ordered = TRUE
+)
+
+otu_data1_tax_long_v2 %>%
+  ggplot(aes(x=gen_age, y=median_abund, color=MT,  ymin = median_abund - sd_abund, ymax = median_abund + sd_abund))+
+  geom_path(alpha = 0.7) +
+  geom_pointrange(alpha = 0.7) +
+  facet_wrap(~ Genus, scales = "free", nrow = 2) +
+  theme(axis.text.x = element_text(angle=90))
+```
+
+# How does FMT samples compare to other aged mice
+```{r}
+fmt_wAging_qiime<-qza_to_phyloseq(features="FMT-table-combined-with-Aging_v4.qza",
+                       tree="rooted-tree-merged-combined.qza",
+                       metadata="MT_OG_metadata.txt", 
+                       taxonomy = "Aging-taxonomy-weighted_silva138-1.qza")
+fmt_wAging_qiime
+```
+```{r}
+fmt_aging_norm<-  fmt_wAging_qiime %>%
+  transform_sample_counts(function(x) x/sum(x))
+
+fmt_aging_norm<-rarefy_even_depth(fmt_wAging_qiime,sample.size = min(sample_sums(fmt_wAging_qiime)))
+
+bdist.ord.fmt.age <- ordinate(fmt_aging_norm, "PCoA", "bray")
+
+plot_ordination(fmt_aging_norm, bdist.ord.fmt.age, color="MT", title="Bray Curtis") +
+    geom_point(aes(fill = MT), size = 4) +  # size outside aes()
+    scale_fill_manual(values = c("#f8766d", "#4477aa","darkgreen","grey","black", "#aa3377", "#619cff")) +
+    scale_color_manual(values = c("#f8766d", "#4477aa","darkgreen","grey","black", "#aa3377", "#619cff")) +
+    #scale_shape_manual(values = c(21, 22, 24, 23, 20)) +  # Add shape scale (fillable shapes)
+    theme(legend.text = element_text(size = 12)) +
+    guides(
+        fill = guide_legend(override.aes = list(shape = 21)),
+        color = guide_legend(override.aes = list(shape = 21)),
+        shape = guide_legend(),
+        alpha = guide_legend(),
+        size = "none"  # Remove size legend since it's constant
+    ) 
+```
+```{r}
+bdist.ord.fmt.age_df <- as.data.frame(bdist.ord.fmt.age$vectors[,1:3])
+bdist.ord.fmt.age_df$MT <- sample_data(fmt_aging_norm)$MT
+
+
+plot_ly(bdist.ord.fmt.age_df, 
+        x = ~Axis.1, y = ~Axis.2, z = ~Axis.3,
+        color = ~MT,
+        colors = c("#f8766d", "#4477aa","darkgreen","grey","black", "#aa3377", "#619cff"),
+        #symbol = ~generation,  # Use 'symbol' instead of 'shape'
+        #symbols = c('circle', 'square', 'diamond', 'cross', 'triangle-up'),  # Define symbols
+        type = "scatter3d", 
+        mode = "markers",
+        marker = list(size = 4)) %>%
+    layout(title = "3D Bray-Curtis Ordination (PCoA)")
+```
+```{r}
+samples_fmt_aging_df<-as.matrix(sample_data(fmt_aging_norm))
+samples_fmt_aging_df<-as.data.frame(samples_fmt_aging_df)
+
+bray_dist_matrix_fmt_age<-phyloseq::distance(fmt_aging_norm, method ="bray")
+```
+
+```{r}
+adonis2(bray_dist_matrix_fmt_age ~ sex+age_type, data = samples_fmt_aging_df, permutations = 999, by="margin")
+```
+```{r}
+pairwiseAdonis::pairwise.adonis(bray_dist_matrix_fmt_age, samples_fmt_aging_df$age_type)
+```
+
+```{r}
+ordination_wu_fmt_age <- ordinate(fmt_aging_norm, method = "PCoA", distance = "unifrac", weighted=TRUE)
+```
+
+
+```{r, echo=FALSE}
+# Plot: pass the phyloseq object, not the distance
+plot_ordination(fmt_aging_norm, ordination_wu_fmt_age, color = "MT",
+                        title = "Weighted UniFrac (PCoA)", shape="generation")+geom_point(aes(fill=MT))+
+  scale_fill_manual(values=c("#f8766d", "#4477aa","darkgreen","grey","black", "#aa3377", "#619cff"))+theme(legend.text = element_text(size=12))+
+ scale_color_manual(values=c("#f8766d", "#4477aa","darkgreen","grey","black", "#aa3377", "#619cff"))+
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21)),
+    shape = guide_legend())+
+  stat_ellipse(aes(group=MT), linetype="dashed")
+```
+```{r}
+ordination_wu_fmt_age_df <- as.data.frame(ordination_wu_fmt_age$vectors[,1:3])
+ordination_wu_fmt_age_df$MT <- sample_data(fmt_aging_norm)$MT
+
+
+plot_ly(ordination_wu_fmt_age_df, 
+        x = ~Axis.1, y = ~Axis.2, z = ~Axis.3,
+        color = ~MT,
+        colors = c("#f8766d", "#4477aa","darkgreen","grey","black", "#aa3377", "#619cff"),
+        #symbol = ~generation,  # Use 'symbol' instead of 'shape'
+        #symbols = c('circle', 'square', 'diamond', 'cross', 'triangle-up'),  # Define symbols
+        type = "scatter3d", 
+        mode = "markers",
+        marker = list(size = 4)) %>%
+    layout(title = "3D Bray-Curtis Ordination (PCoA)")
+```
+
+# Maaslin results of MT-Middle aged
+```{r}
+mt_maas<-read.delim("output")
+```
+
+#Beta dispersion
+```{r}
+bray_dist_fmt<-phyloseq::distance(fmt_norm, method = "bray")
+metadata_fmt$SampleID<-rownames(metadata_fmt)
+
+bd_fmt <- betadisper(bray_dist_fmt, metadata_fmt$MT)
+bd_df_fmt <- data.frame(
+  Distance = bd_fmt$distances,
+  MT = metadata_fmt$MT,
+  age=metadata_fmt$age_type, 
+  mouse= metadata_fmt$mouse,
+  generation=metadata_fmt$generation
+)
+
+#Optional to make a line plot with medians
+median_fmt_df <- bd_df %>%
+  group_by(Sex, Month) %>%
+  summarise(median_distance = median(Distance, na.rm = TRUE), .groups = "drop")
+
+anova(bd_fmt)
+```
+```{r}
+ggplot(bd_df_fmt, aes(x = MT, y = Distance, fill = age)) +
+  geom_boxplot(position = position_dodge(width = 0.75)) +
+  theme_classic(base_size = 12) +
+  labs(title = "Beta Dispersion by Month and Sex",
+       x = "Month", y = "Distance to Group Centroid") +
+  theme(legend.position = "right")+facet_grid(~generation)
+```
+
